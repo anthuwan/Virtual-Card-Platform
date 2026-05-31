@@ -81,7 +81,7 @@ A spend with insufficient funds returns **HTTP 200** with `"status": "DECLINED"`
 
 ### Domain Model
 
-The domain layer (`com.malta.card.domain`) is intentionally **free of infrastructure dependencies** — no JPA annotations, no JOOQ imports. `Card` and `Transaction` are plain Java records. `CardService` contains all business logic and depends only on repository _interfaces_.
+The domain layer (`com.virtual.card.domain`) is intentionally **free of infrastructure dependencies** — no JPA annotations, no JOOQ imports. `Card` and `Transaction` are plain Java records. `CardService` contains all business logic and depends only on repository _interfaces_.
 
 This hexagonal (ports-and-adapters) structure means:
 - Business rules are unit-testable without starting Spring or a database
