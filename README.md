@@ -114,3 +114,26 @@ Replace each with a real implementation — the interfaces and wiring are alread
 - Kafka is a placeholder — replace `CardEventPublisher` with `KafkaTemplate`
 - No transaction pagination — needs cursor-based pagination at scale
 - No webhook registration API — `WebhookDispatcher` needs endpoint storage + delivery tracking
+
+---
+
+## What I Would Do With More Time
+
+- Replace in-process Bucket4j with Redis-backed for shared rate limiting across instances
+- Replace `CardEventPublisher` placeholder with real `KafkaTemplate` and consumer group
+- Add cursor-based pagination on `GET /api/v1/cards/{id}/transactions`
+- Add webhook endpoint registration API with HMAC signature verification and delivery log
+- Add `GET /api/v1/cards` list endpoint pagination (currently returns full list)
+- Expand test coverage: security layer tests, outbox retry tests, circuit breaker state tests
+
+---
+
+## Learning Strategy for New Libraries
+
+**Resilience4j** — Read the Spring Boot 3 auto-configuration docs first to understand what `@CircuitBreaker` wires automatically vs. what needs explicit config. Then wrote a failing test against `FraudCheckService` to confirm the fallback triggered correctly before wiring the rest.
+
+**ShedLock** — Reviewed the JDBC provider README to understand the `lock_until` / `locked_at` / `locked_by` column contract, then cross-checked `lockAtMostFor` vs `lockAtLeastFor` semantics against the multi-instance failure scenarios (JVM crash mid-job, clock skew). Chose `usingDbTime()` to eliminate clock-skew risk across JVM instances.
+
+**Bucket4j** — Started with the token bucket algorithm docs to confirm it matches burst-then-drain behaviour needed for a financial API. Confirmed the in-process limitation early and documented the Redis upgrade path so it isn't a surprise at scale.
+
+**Testcontainers** — Used the JUnit 5 `@Testcontainers` + `@Container` annotations for lifecycle management rather than managing the container manually. The PostgreSQL module auto-configures the JDBC URL via `@DynamicPropertySource`, so test config stays minimal.
