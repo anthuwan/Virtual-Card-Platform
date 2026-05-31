@@ -26,11 +26,14 @@ spring:
           # Spring Boot auto-fetches the JWKS from {issuer-uri}/.well-known/openid-configuration
           issuer-uri: ${JWT_ISSUER_URI:http://localhost:9090/realms/virtual-card}
 
-  # Request size limits — prevent large payload attacks
-  servlet:
-    multipart:
-      max-file-size: 1MB
-      max-request-size: 2MB
+  # Request size limits — prevent large payload attacks on JSON endpoints
+  mvc:
+    servlet:
+      max-request-header-size: 8KB
+
+server:
+  tomcat:
+    max-http-form-post-size: 50KB   # max JSON body size — cards/transactions need only a few bytes
 
   cache:
     # Using Caffeine (in-process). To switch to Redis for multi-instance deployments:
