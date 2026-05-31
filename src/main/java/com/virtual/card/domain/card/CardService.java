@@ -111,6 +111,16 @@ public class CardService {
     }
 
     /**
+     * Returns all cards owned by the given user, ordered newest-first.
+     * Not cached — the list changes on every card creation/status change.
+     */
+    @Transactional(readOnly = true)
+    public List<Card> listCardsByOwner(String ownerId) {
+        log.debug("Listing cards for owner: {}", ownerId);
+        return cardRepository.findByOwnerIdOrderByCreatedAtDesc(ownerId);
+    }
+
+    /**
      * Deducts {@code amount} from the card balance.
      *
      * <p>If funds are insufficient, the transaction is recorded as DECLINED — not thrown

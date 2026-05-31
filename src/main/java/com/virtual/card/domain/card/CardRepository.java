@@ -38,6 +38,12 @@ public interface CardRepository extends JpaRepository<Card, UUID> {
     Optional<Card> findByIdForUpdate(@Param("id") UUID id);
 
     /**
+     * Returns all cards belonging to the given owner, ordered newest-first.
+     * Used by the list-cards endpoint — cardholders see only their own cards.
+     */
+    List<Card> findByOwnerIdOrderByCreatedAtDesc(String ownerId);
+
+    /**
      * Returns all cards in the given status whose expiry date is before the threshold.
      * Used by the scheduled card expiration job.
      */

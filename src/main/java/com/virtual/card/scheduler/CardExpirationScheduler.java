@@ -1,6 +1,7 @@
 package com.virtual.card.scheduler;
 
 import com.virtual.card.domain.card.CardService;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -17,11 +18,12 @@ import java.time.LocalDateTime;
  * <p>The job delegates to {@link CardService#expireCards} which finds all ACTIVE cards
  * whose {@code expires_at} is in the past and marks them EXPIRED in a single batch.
  *
- * <h2>Scaling consideration</h2>
- * <p>In a multi-instance deployment this job would run on every instance simultaneously.
- * Solutions: (1) use ShedLock or Spring Batch to ensure only one instance runs at a time;
- * (2) move to an event-driven model where a single scheduler emits card-expiry events
- * consumed by one instance.
+ * <h2>Distributed locking</h2>
+ * <p>{@code @SchedulerLock} ensures only one application instance executes this job
+ * at a time (via the {@code shedlock} table). {@code lockAtMostFor} caps the lock
+ * duration to 5 minutes — if the JVM crashes mid-run, the lock auto-releases.
+ * {@code lockAtLeastFor} prevents another instance from immediately re-running the
+ * job within the same cron window, adding safety against clock drift.
  */
 @Component
 public class CardExpirationScheduler {
@@ -35,6 +37,7 @@ public class CardExpirationScheduler {
     }
 
     @Scheduled(cron = "${app.card.expiry-check-cron}")
+    @SchedulerLock(name = "cardExpirationJob", lockAtMostFor = "5m", lockAtLeastFor = "1m")
     public void expireCards() {
         LocalDateTime now = LocalDateTime.now();
         log.info("Running card expiration check at {}", now);

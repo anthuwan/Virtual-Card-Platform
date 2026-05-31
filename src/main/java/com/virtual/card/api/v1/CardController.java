@@ -80,6 +80,21 @@ public class CardController {
                 .body(CardResponse.from(card));
     }
 
+    @GetMapping
+    @Operation(
+            summary = "List my cards",
+            description = "Returns all cards belonging to the authenticated user, ordered newest-first.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Card list (may be empty)")
+            }
+    )
+    public List<CardResponse> listCards() {
+        String ownerId = cardSecurityService.getAuthenticatedUserId();
+        return cardService.listCardsByOwner(ownerId).stream()
+                .map(CardResponse::from)
+                .toList();
+    }
+
     @GetMapping("/{cardId}")
     @Operation(
             summary = "Retrieve card details",
