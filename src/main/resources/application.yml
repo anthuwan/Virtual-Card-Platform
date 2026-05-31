@@ -26,6 +26,12 @@ spring:
           # Spring Boot auto-fetches the JWKS from {issuer-uri}/.well-known/openid-configuration
           issuer-uri: ${JWT_ISSUER_URI:http://localhost:9090/realms/virtual-card}
 
+  # Request size limits — prevent large payload attacks
+  servlet:
+    multipart:
+      max-file-size: 1MB
+      max-request-size: 2MB
+
   cache:
     # Using Caffeine (in-process). To switch to Redis for multi-instance deployments:
     # type: redis
@@ -78,6 +84,13 @@ resilience4j:
 
 # Application configuration
 app:
+  security:
+    # Allowed CORS origins — override per environment
+    # Production: set APP_SECURITY_ALLOWED_ORIGINS=https://your-frontend.com
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:8080
+
   rate-limit:
     capacity: 100           # max tokens in bucket
     refill-tokens: 100      # tokens refilled per window
