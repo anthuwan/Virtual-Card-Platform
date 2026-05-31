@@ -33,8 +33,7 @@ import static org.mockito.Mockito.*;
 class CardServiceTest {
 
     @Mock CardRepository cardRepository;
-    @Mock
-    TransactionRepository transactionRepository;
+    @Mock TransactionRepository transactionRepository;
     @Mock CardMetrics metrics;
     @Mock ApplicationEventPublisher eventPublisher;
 
@@ -46,9 +45,8 @@ class CardServiceTest {
     @BeforeEach
     void setUp() {
         cardId = UUID.randomUUID();
-        activeCard = new Card(cardId, "Jane Smith", new BigDecimal("100.00"),
-                CardStatus.ACTIVE, LocalDateTime.now().plusYears(3),
-                LocalDateTime.now(), LocalDateTime.now());
+        activeCard = new Card("Jane Smith", new BigDecimal("100.00"),
+                CardStatus.ACTIVE, LocalDateTime.now().plusYears(3));
     }
 
     // ─── createCard ───────────────────────────────────────────────────────────
@@ -58,16 +56,29 @@ class CardServiceTest {
     class CreateCard {
 
         @Test
-        @DisplayName("creates card with given name and initial balance")
+        @DisplayName("saves card and records initial load transaction")
         void createsCard() {
-            when(cardRepository.create(anyString(), any(), any())).thenReturn(activeCard);
+            when(cardRepository.save(any(Card.class))).thenAnswer(inv -> inv.getArgument(0));
+            when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
             Card result = cardService.createCard("Jane Smith", new BigDecimal("100.00"),
                     LocalDateTime.now().plusYears(3));
 
-            assertThat(result.cardholderName()).isEqualTo("Jane Smith");
-            assertThat(result.balance()).isEqualByComparingTo("100.00");
+            assertThat(result.getCardholderName()).isEqualTo("Jane Smith");
+            assertThat(result.getBalance()).isEqualByComparingTo("100.00");
+            verify(cardRepository).save(any(Card.class));
+            verify(transactionRepository).save(any(Transaction.class)); // initial load
             verify(metrics).incrementCardCreated();
+        }
+
+        @Test
+        @DisplayName("does not record initial transaction for zero balance")
+        void noTransactionForZeroBalance() {
+            when(cardRepository.save(any(Card.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            cardService.createCard("Jane Smith", BigDecimal.ZERO, LocalDateTime.now().plusYears(3));
+
+            verify(transactionRepository, never()).save(any());
         }
     }
 
@@ -80,37 +91,29 @@ class CardServiceTest {
         @Test
         @DisplayName("deducts amount from balance on success")
         void deductsBalance() {
-            Transaction successTx = buildTransaction(TransactionStatus.SUCCESSFUL, "50.00");
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(activeCard));
-            when(cardRepository.updateBalance(eq(cardId), any())).thenReturn(activeCard);
-            when(transactionRepository.create(any(), any(), any(), any(), any(), any())).thenReturn(successTx);
+            when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
             Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), null, null);
 
-            assertThat(result.status()).isEqualTo(TransactionStatus.SUCCESSFUL);
-
-            // Verify balance update called with correct amount
-            ArgumentCaptor<BigDecimal> balanceCaptor = ArgumentCaptor.forClass(BigDecimal.class);
-            verify(cardRepository).updateBalance(eq(cardId), balanceCaptor.capture());
-            assertThat(balanceCaptor.getValue()).isEqualByComparingTo("50.00");
-
+            assertThat(result.getStatus()).isEqualTo(TransactionStatus.SUCCESSFUL);
+            assertThat(result.getType()).isEqualTo(TransactionType.SPEND);
+            assertThat(activeCard.getBalance()).isEqualByComparingTo("50.00"); // dirty-check update
             verify(metrics).incrementSpendSuccess();
         }
 
         @Test
         @DisplayName("returns DECLINED transaction when funds insufficient")
         void declinesOnInsufficientFunds() {
-            Card lowBalanceCard = cardWithBalance("10.00");
-            Transaction declinedTx = buildTransaction(TransactionStatus.DECLINED, "50.00");
-
-            when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(lowBalanceCard));
-            when(transactionRepository.create(any(), any(), any(), eq(TransactionStatus.DECLINED), any(), any()))
-                    .thenReturn(declinedTx);
+            Card lowCard = new Card("Jane", new BigDecimal("10.00"),
+                    CardStatus.ACTIVE, LocalDateTime.now().plusYears(3));
+            when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(lowCard));
+            when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
             Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), null, null);
 
-            assertThat(result.status()).isEqualTo(TransactionStatus.DECLINED);
-            verify(cardRepository, never()).updateBalance(any(), any());
+            assertThat(result.getStatus()).isEqualTo(TransactionStatus.DECLINED);
+            assertThat(lowCard.getBalance()).isEqualByComparingTo("10.00"); // balance unchanged
             verify(metrics).incrementSpendDeclined();
         }
 
@@ -126,14 +129,14 @@ class CardServiceTest {
         @Test
         @DisplayName("throws CardNotActiveException when card is blocked")
         void throwsWhenCardBlocked() {
-            Card blockedCard = new Card(cardId, "Jane", new BigDecimal("100.00"),
-                    CardStatus.BLOCKED, null, LocalDateTime.now(), LocalDateTime.now());
+            Card blockedCard = new Card("Jane", new BigDecimal("100.00"),
+                    CardStatus.BLOCKED, null);
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(blockedCard));
 
             assertThatThrownBy(() -> cardService.spend(cardId, new BigDecimal("10.00"), null, null))
                     .isInstanceOf(CardNotActiveException.class);
 
-            verify(transactionRepository, never()).create(any(), any(), any(), any(), any(), any());
+            verify(transactionRepository, never()).save(any());
         }
 
         @Test
@@ -146,28 +149,21 @@ class CardServiceTest {
             Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), key, null);
 
             assertThat(result).isSameAs(existingTx);
-            // Should NOT acquire lock or touch balance
             verify(cardRepository, never()).findByIdForUpdate(any());
-            verify(cardRepository, never()).updateBalance(any(), any());
         }
 
         @Test
         @DisplayName("balance cannot go below zero — boundary condition")
         void balanceNeverGoesBelowZero() {
-            Card exactCard = cardWithBalance("50.00");
-            Transaction successTx = buildTransaction(TransactionStatus.SUCCESSFUL, "50.00");
-
+            Card exactCard = new Card("Jane Smith", new BigDecimal("50.00"),
+                    CardStatus.ACTIVE, LocalDateTime.now().plusYears(3));
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(exactCard));
-            when(cardRepository.updateBalance(any(), any())).thenReturn(exactCard);
-            when(transactionRepository.create(any(), any(), any(), any(), any(), any())).thenReturn(successTx);
+            when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            // Spending exactly the balance should succeed
             Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), null, null);
-            assertThat(result.status()).isEqualTo(TransactionStatus.SUCCESSFUL);
 
-            ArgumentCaptor<BigDecimal> captor = ArgumentCaptor.forClass(BigDecimal.class);
-            verify(cardRepository).updateBalance(any(), captor.capture());
-            assertThat(captor.getValue()).isEqualByComparingTo("0.00");
+            assertThat(result.getStatus()).isEqualTo(TransactionStatus.SUCCESSFUL);
+            assertThat(exactCard.getBalance()).isEqualByComparingTo("0.00");
         }
     }
 
@@ -180,26 +176,21 @@ class CardServiceTest {
         @Test
         @DisplayName("adds amount to balance")
         void addsToBalance() {
-            Transaction successTx = buildTransaction(TransactionStatus.SUCCESSFUL, "200.00");
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(activeCard));
-            when(cardRepository.updateBalance(eq(cardId), any())).thenReturn(activeCard);
-            when(transactionRepository.create(any(), any(), any(), any(), any(), any())).thenReturn(successTx);
+            when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
             Transaction result = cardService.topUp(cardId, new BigDecimal("200.00"), null, null);
 
-            assertThat(result.status()).isEqualTo(TransactionStatus.SUCCESSFUL);
-
-            ArgumentCaptor<BigDecimal> captor = ArgumentCaptor.forClass(BigDecimal.class);
-            verify(cardRepository).updateBalance(eq(cardId), captor.capture());
-            assertThat(captor.getValue()).isEqualByComparingTo("300.00"); // 100 + 200
+            assertThat(result.getStatus()).isEqualTo(TransactionStatus.SUCCESSFUL);
+            assertThat(activeCard.getBalance()).isEqualByComparingTo("300.00"); // 100 + 200
             verify(metrics).incrementTopUpSuccess();
         }
 
         @Test
         @DisplayName("throws CardNotActiveException on closed card")
         void throwsWhenClosed() {
-            Card closedCard = new Card(cardId, "Jane", new BigDecimal("100.00"),
-                    CardStatus.CLOSED, null, LocalDateTime.now(), LocalDateTime.now());
+            Card closedCard = new Card("Jane", new BigDecimal("100.00"),
+                    CardStatus.CLOSED, null);
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(closedCard));
 
             assertThatThrownBy(() -> cardService.topUp(cardId, new BigDecimal("10.00"), null, null))
@@ -229,7 +220,7 @@ class CardServiceTest {
         @Test
         @DisplayName("returns transactions for existing card")
         void returnsHistory() {
-            when(cardRepository.findById(cardId)).thenReturn(Optional.of(activeCard));
+            when(cardRepository.existsById(cardId)).thenReturn(true);
             when(transactionRepository.findByCardId(cardId)).thenReturn(List.of());
 
             List<Transaction> result = cardService.getTransactionHistory(cardId);
@@ -240,7 +231,7 @@ class CardServiceTest {
         @Test
         @DisplayName("throws CardNotFoundException for unknown card")
         void throwsForUnknownCard() {
-            when(cardRepository.findById(cardId)).thenReturn(Optional.empty());
+            when(cardRepository.existsById(cardId)).thenReturn(false);
 
             assertThatThrownBy(() -> cardService.getTransactionHistory(cardId))
                     .isInstanceOf(CardNotFoundException.class);
@@ -249,14 +240,9 @@ class CardServiceTest {
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
-    private Card cardWithBalance(String amount) {
-        return new Card(cardId, "Jane Smith", new BigDecimal(amount),
-                CardStatus.ACTIVE, LocalDateTime.now().plusYears(3),
-                LocalDateTime.now(), LocalDateTime.now());
-    }
-
     private Transaction buildTransaction(TransactionStatus status, String amount) {
-        return new Transaction(UUID.randomUUID(), cardId, TransactionType.SPEND,
-                new BigDecimal(amount), status, null, null, LocalDateTime.now());
+        Card card = new Card("Jane Smith", new BigDecimal(amount),
+                CardStatus.ACTIVE, LocalDateTime.now().plusYears(3));
+        return new Transaction(card, TransactionType.SPEND, new BigDecimal(amount), status, null, null);
     }
 }

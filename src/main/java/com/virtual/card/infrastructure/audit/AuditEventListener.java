@@ -32,11 +32,11 @@ public class AuditEventListener {
         Transaction tx = event.getTransaction();
         // Structured audit log — in production, ship to a log aggregator (e.g. Datadog, ELK)
         auditLog.info("AUDIT | type={} | status={} | cardId={} | amount={} | txId={} | idempotencyKey={}",
-                tx.type(),
-                tx.status(),
-                tx.cardId(),
-                tx.amount(),
-                tx.id(),
-                tx.idempotencyKey());
+                tx.getType(),
+                tx.getStatus(),
+                tx.getCardId(),
+                tx.getAmount(),
+                tx.getId(),
+                tx.getIdempotencyKey());
     }
 }

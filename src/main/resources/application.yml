@@ -18,8 +18,13 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
 
-  jooq:
-    sql-dialect: POSTGRES
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
 
 # Actuator / Observability
 management:

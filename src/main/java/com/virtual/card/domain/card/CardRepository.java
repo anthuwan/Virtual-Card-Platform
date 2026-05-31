@@ -1,51 +1,49 @@
 package com.virtual.card.domain.card;
 
-import java.math.BigDecimal;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Port (interface) for card persistence operations.
+ * Spring Data JPA repository for {@link Card} entities.
  *
- * <p>The service layer depends only on this interface; the JOOQ implementation lives in
- * the infrastructure layer. This inversion keeps the domain free of persistence details
- * and makes unit testing straightforward with simple mocks.
+ * <h2>Pessimistic Locking</h2>
+ * <p>{@link #findByIdForUpdate} uses {@code @Lock(PESSIMISTIC_WRITE)} which
+ * translates to {@code SELECT ... FOR UPDATE} in PostgreSQL — the same
+ * database-level locking as JOOQ's {@code .forUpdate()}.
+ *
+ * <p>Concurrency flow:
+ * <ol>
+ *   <li>Thread A calls findByIdForUpdate → acquires row lock</li>
+ *   <li>Thread B calls findByIdForUpdate → blocks at DB level, waits</li>
+ *   <li>Thread A updates balance, commits → lock released</li>
+ *   <li>Thread B unblocks, reads updated balance, makes its own decision</li>
+ * </ol>
  */
-public interface CardRepository {
+public interface CardRepository extends JpaRepository<Card, UUID> {
 
     /**
-     * Persists a new card and returns the saved state.
+     * Acquires a pessimistic write lock on the card row (SELECT ... FOR UPDATE).
+     * Must be called within an active @Transactional context.
      */
-    Card create(String cardholderName, BigDecimal initialBalance, LocalDateTime expiresAt);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT c FROM Card c WHERE c.id = :id")
+    Optional<Card> findByIdForUpdate(@Param("id") UUID id);
 
     /**
-     * Finds a card by its ID. Returns empty if not found.
+     * Returns all cards in the given status whose expiry date is before the threshold.
+     * Used by the scheduled card expiration job.
      */
-    Optional<Card> findById(UUID id);
-
-    /**
-     * Finds a card by ID and acquires a pessimistic write lock (SELECT FOR UPDATE).
-     *
-     * <p>Must be called within an active transaction. Used during spend and top-up
-     * to prevent lost updates under concurrent access.
-     */
-    Optional<Card> findByIdForUpdate(UUID id);
-
-    /**
-     * Updates the balance of an existing card.
-     */
-    Card updateBalance(UUID id, BigDecimal newBalance);
-
-    /**
-     * Transitions a card to a new status.
-     */
-    Card updateStatus(UUID id, CardStatus status);
-
-    /**
-     * Returns all cards in the given status whose expiry date is before the given instant.
-     * Used by the scheduled expiration job.
-     */
-    List<Card> findByStatusAndExpiresAtBefore(CardStatus status, LocalDateTime threshold);
+    @Query("SELECT c FROM Card c WHERE c.status = :status " +
+           "AND c.expiresAt IS NOT NULL AND c.expiresAt < :threshold")
+    List<Card> findByStatusAndExpiresAtBefore(
+            @Param("status") CardStatus status,
+            @Param("threshold") LocalDateTime threshold);
 }

@@ -35,13 +35,13 @@ public record TransactionResponse(
 ) {
     public static TransactionResponse from(Transaction tx) {
         return new TransactionResponse(
-                tx.id(),
-                tx.cardId(),
-                tx.type(),
-                tx.amount(),
-                tx.status(),
-                tx.description(),
-                tx.createdAt()
+                tx.getId(),
+                tx.getCardId(),
+                tx.getType(),
+                tx.getAmount(),
+                tx.getStatus(),
+                tx.getDescription(),
+                tx.getCreatedAt()
         );
     }
 }

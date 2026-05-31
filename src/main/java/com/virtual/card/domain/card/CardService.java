@@ -23,22 +23,19 @@ import java.util.UUID;
  * Core application service orchestrating card lifecycle and financial operations.
  *
  * <h2>Concurrency Strategy</h2>
- * <p>Spend and top-up both call {@link CardRepository#findByIdForUpdate} which issues
- * a {@code SELECT ... FOR UPDATE} at the database level. This ensures that concurrent
- * requests for the same card are serialised — only one transaction holds the row lock
- * at a time, preventing lost updates and double-spend conditions. The JOOQ repository
- * implementation runs within a Spring-managed transaction, so the lock is released at
- * commit/rollback.
+ * <p>Spend and top-up both call {@link CardRepository#findByIdForUpdate} which uses
+ * {@code @Lock(PESSIMISTIC_WRITE)} — translating to {@code SELECT ... FOR UPDATE}
+ * in PostgreSQL. This serialises concurrent requests for the same card at the
+ * database level, preventing lost updates and double-spend conditions.
  *
  * <h2>Idempotency</h2>
  * <p>Callers may include an {@code Idempotency-Key} header. If a transaction with that
- * key already exists, the original result is returned without re-processing. This allows
- * clients to safely retry on network failures. Both successful and declined transactions
- * are eligible for idempotent replay.
+ * key already exists, the original result is returned without re-processing — safe
+ * for client retries on network failures.
  *
  * <h2>Balance Invariant</h2>
- * <p>The service enforces balance ≥ 0 at the application layer. The database schema
- * also has a {@code CHECK (balance >= 0)} constraint as a defence-in-depth measure.
+ * <p>Balance ≥ 0 is enforced at the service layer. The DB schema also has a
+ * {@code CHECK (balance >= 0)} constraint as defence-in-depth.
  */
 @Service
 @Transactional
@@ -63,22 +60,23 @@ public class CardService {
 
     /**
      * Issues a new virtual card with the given cardholder name and initial balance.
-     * Cards default to ACTIVE status and expire after the configured period.
      */
     public Card createCard(String cardholderName, BigDecimal initialBalance, LocalDateTime expiresAt) {
         log.info("Creating card for cardholder='{}', initialBalance={}", cardholderName, initialBalance);
 
-        Card card = cardRepository.create(cardholderName, initialBalance, expiresAt);
+        Card card = new Card(cardholderName, initialBalance, CardStatus.ACTIVE, expiresAt);
+        cardRepository.save(card);
 
-        // Record initial load as a transaction for complete audit trail
+        // Record initial load as a transaction for a complete audit trail
         if (initialBalance.compareTo(BigDecimal.ZERO) > 0) {
-            transactionRepository.create(
-                    card.id(), TransactionType.TOP_UP, initialBalance,
+            Transaction initialLoad = new Transaction(
+                    card, TransactionType.TOP_UP, initialBalance,
                     TransactionStatus.SUCCESSFUL, null, "Initial card load");
+            transactionRepository.save(initialLoad);
         }
 
         metrics.incrementCardCreated();
-        log.info("Card created: id={}, cardholder='{}'", card.id(), cardholderName);
+        log.info("Card created: id={}, cardholder='{}'", card.getId(), cardholderName);
         return card;
     }
 
@@ -95,112 +93,103 @@ public class CardService {
     /**
      * Deducts {@code amount} from the card balance.
      *
-     * <p>Declined transactions (insufficient funds, inactive card) are persisted for
-     * audit purposes but do not alter the card balance.
-     *
-     * @param cardId         target card
-     * @param amount         positive amount to deduct
-     * @param idempotencyKey optional deduplication key
-     * @param description    optional human-readable reason
-     * @return the resulting transaction (may be DECLINED)
+     * <p>If funds are insufficient, the transaction is recorded as DECLINED — not thrown
+     * as an error. Declined transactions are persisted for audit and idempotency purposes.
      */
     public Transaction spend(UUID cardId, BigDecimal amount, String idempotencyKey, String description) {
         log.info("Spend request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, idempotencyKey);
 
-        // --- Idempotency check (before acquiring row lock for performance) ---
+        // Idempotency check — fast path before acquiring lock
         if (idempotencyKey != null) {
             var existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
             if (existing.isPresent()) {
-                log.info("Idempotent spend replay: key={}, txId={}", idempotencyKey, existing.get().id());
+                log.info("Idempotent spend replay: key={}, txId={}", idempotencyKey, existing.get().getId());
                 return existing.get();
             }
         }
 
-        // --- Acquire pessimistic lock to serialise concurrent spend/topup on same card ---
+        // Acquire pessimistic write lock — serialises concurrent spends on same card
         Card card = cardRepository.findByIdForUpdate(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
 
-        // --- Card must be ACTIVE ---
+        // Card must be ACTIVE
         if (!card.isOperational()) {
-            log.warn("Spend declined — card not active: cardId={}, status={}", cardId, card.status());
-            throw new CardNotActiveException(cardId, card.status());
+            log.warn("Spend rejected — card not active: cardId={}, status={}", cardId, card.getStatus());
+            throw new CardNotActiveException(cardId, card.getStatus());
         }
 
-        // --- Insufficient funds → persist DECLINED transaction (never throw) ---
-        if (card.balance().compareTo(amount) < 0) {
+        // Insufficient funds → record DECLINED, return (no exception)
+        if (card.getBalance().compareTo(amount) < 0) {
             log.warn("Spend declined — insufficient funds: cardId={}, available={}, requested={}",
-                    cardId, card.balance(), amount);
-            Transaction declined = transactionRepository.create(
-                    cardId, TransactionType.SPEND, amount,
+                    cardId, card.getBalance(), amount);
+            Transaction declined = new Transaction(
+                    card, TransactionType.SPEND, amount,
                     TransactionStatus.DECLINED, idempotencyKey, description);
+            transactionRepository.save(declined);
 
             metrics.incrementSpendDeclined();
             eventPublisher.publishEvent(new TransactionAuditEvent(this, declined));
             return declined;
         }
 
-        // --- Deduct balance and record success ---
-        BigDecimal newBalance = card.balance().subtract(amount);
-        cardRepository.updateBalance(cardId, newBalance);
+        // Deduct balance — JPA dirty checking auto-saves on transaction commit
+        BigDecimal newBalance = card.getBalance().subtract(amount);
+        card.setBalance(newBalance);
 
-        Transaction tx = transactionRepository.create(
-                cardId, TransactionType.SPEND, amount,
+        Transaction tx = new Transaction(
+                card, TransactionType.SPEND, amount,
                 TransactionStatus.SUCCESSFUL, idempotencyKey, description);
+        transactionRepository.save(tx);
 
         metrics.incrementSpendSuccess();
         metrics.recordTransactionAmount(amount);
         eventPublisher.publishEvent(new TransactionAuditEvent(this, tx));
 
         log.info("Spend successful: cardId={}, amount={}, newBalance={}, txId={}",
-                cardId, amount, newBalance, tx.id());
+                cardId, amount, newBalance, tx.getId());
         return tx;
     }
 
     /**
      * Adds {@code amount} to the card balance.
-     *
-     * @param cardId         target card
-     * @param amount         positive amount to add
-     * @param idempotencyKey optional deduplication key
-     * @param description    optional human-readable reason
-     * @return the resulting transaction
      */
     public Transaction topUp(UUID cardId, BigDecimal amount, String idempotencyKey, String description) {
         log.info("TopUp request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, idempotencyKey);
 
-        // --- Idempotency check ---
+        // Idempotency check
         if (idempotencyKey != null) {
             var existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
             if (existing.isPresent()) {
-                log.info("Idempotent topUp replay: key={}, txId={}", idempotencyKey, existing.get().id());
+                log.info("Idempotent topUp replay: key={}, txId={}", idempotencyKey, existing.get().getId());
                 return existing.get();
             }
         }
 
-        // --- Acquire pessimistic lock ---
+        // Acquire pessimistic write lock
         Card card = cardRepository.findByIdForUpdate(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
 
-        // --- Card must be ACTIVE ---
+        // Card must be ACTIVE
         if (!card.isOperational()) {
-            log.warn("TopUp rejected — card not active: cardId={}, status={}", cardId, card.status());
-            throw new CardNotActiveException(cardId, card.status());
+            log.warn("TopUp rejected — card not active: cardId={}, status={}", cardId, card.getStatus());
+            throw new CardNotActiveException(cardId, card.getStatus());
         }
 
-        // --- Credit balance ---
-        BigDecimal newBalance = card.balance().add(amount);
-        cardRepository.updateBalance(cardId, newBalance);
+        // Credit balance — JPA dirty checking auto-saves on commit
+        BigDecimal newBalance = card.getBalance().add(amount);
+        card.setBalance(newBalance);
 
-        Transaction tx = transactionRepository.create(
-                cardId, TransactionType.TOP_UP, amount,
+        Transaction tx = new Transaction(
+                card, TransactionType.TOP_UP, amount,
                 TransactionStatus.SUCCESSFUL, idempotencyKey, description);
+        transactionRepository.save(tx);
 
         metrics.incrementTopUpSuccess();
         metrics.recordTransactionAmount(amount);
         eventPublisher.publishEvent(new TransactionAuditEvent(this, tx));
 
         log.info("TopUp successful: cardId={}, amount={}, newBalance={}, txId={}",
-                cardId, amount, newBalance, tx.id());
+                cardId, amount, newBalance, tx.getId());
         return tx;
     }
 
@@ -210,25 +199,24 @@ public class CardService {
     @Transactional(readOnly = true)
     public List<Transaction> getTransactionHistory(UUID cardId) {
         log.debug("Fetching transaction history: cardId={}", cardId);
-        // Ensure card exists before fetching transactions
-        if (cardRepository.findById(cardId).isEmpty()) {
+        if (!cardRepository.existsById(cardId)) {
             throw new CardNotFoundException(cardId);
         }
         return transactionRepository.findByCardId(cardId);
     }
 
     /**
-     * Transitions a card to BLOCKED status. Only ACTIVE cards can be blocked.
+     * Blocks an ACTIVE card. Spend and top-up are disabled while blocked.
      */
     public Card blockCard(UUID cardId) {
         log.info("Blocking card: id={}", cardId);
         Card card = cardRepository.findById(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
-
-        if (card.status() != CardStatus.ACTIVE) {
-            throw new CardNotActiveException(cardId, card.status());
+        if (card.getStatus() != CardStatus.ACTIVE) {
+            throw new CardNotActiveException(cardId, card.getStatus());
         }
-        return cardRepository.updateStatus(cardId, CardStatus.BLOCKED);
+        card.setStatus(CardStatus.BLOCKED);
+        return cardRepository.save(card);
     }
 
     /**
@@ -236,19 +224,21 @@ public class CardService {
      */
     public Card closeCard(UUID cardId) {
         log.info("Closing card: id={}", cardId);
-        cardRepository.findById(cardId)
+        Card card = cardRepository.findById(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
-        return cardRepository.updateStatus(cardId, CardStatus.CLOSED);
+        card.setStatus(CardStatus.CLOSED);
+        return cardRepository.save(card);
     }
 
     /**
-     * Marks cards as EXPIRED. Called by the scheduler; not exposed via REST.
+     * Marks expired cards as EXPIRED. Called by the scheduler.
      */
     public void expireCards(LocalDateTime threshold) {
         List<Card> expiring = cardRepository.findByStatusAndExpiresAtBefore(CardStatus.ACTIVE, threshold);
         expiring.forEach(card -> {
-            cardRepository.updateStatus(card.id(), CardStatus.EXPIRED);
-            log.info("Card expired: id={}, expiredAt={}", card.id(), card.expiresAt());
+            card.setStatus(CardStatus.EXPIRED);
+            cardRepository.save(card);
+            log.info("Card expired: id={}, expiredAt={}", card.getId(), card.getExpiresAt());
             metrics.incrementCardExpired();
         });
         if (!expiring.isEmpty()) {

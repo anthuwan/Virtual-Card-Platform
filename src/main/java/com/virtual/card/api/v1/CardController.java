@@ -66,10 +66,10 @@ public class CardController {
                 : LocalDateTime.now().plusMonths(expirationProperties.defaultExpiryMonths());
 
         Card card = cardService.createCard(request.cardholderName(), request.initialBalance(), expiresAt);
-        log.info("Card issued via API: id={}", card.id());
+        log.info("Card issued via API: id={}", card.getId());
 
         return ResponseEntity
-                .created(URI.create("/api/v1/cards/" + card.id()))
+                .created(URI.create("/api/v1/cards/" + card.getId()))
                 .body(CardResponse.from(card));
     }
 

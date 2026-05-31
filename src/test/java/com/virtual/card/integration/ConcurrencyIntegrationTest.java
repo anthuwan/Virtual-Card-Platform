@@ -84,9 +84,9 @@ class ConcurrencyIntegrationTest {
             executor.submit(() -> {
                 try {
                     startLatch.await(); // hold until all threads are ready
-                    Transaction tx = cardService.spend(card.id(), spendAmount,
+                    Transaction tx = cardService.spend(card.getId(), spendAmount,
                             "concurrent-spend-" + threadIdx, null);
-                    if (tx.status() == TransactionStatus.SUCCESSFUL) {
+                    if (tx.getStatus() == TransactionStatus.SUCCESSFUL) {
                         successCount.incrementAndGet();
                     } else {
                         declinedCount.incrementAndGet();
@@ -105,13 +105,13 @@ class ConcurrencyIntegrationTest {
         executor.shutdown();
 
         // Assert
-        Card finalCard = cardService.getCard(card.id());
+        Card finalCard = cardService.getCard(card.getId());
 
         assertThat(successCount.get()).isEqualTo(30)
                 .as("Exactly 30 out of 50 spends of £10 should succeed on a £300 balance");
         assertThat(declinedCount.get()).isEqualTo(20)
                 .as("Exactly 20 should be declined due to insufficient funds");
-        assertThat(finalCard.balance()).isEqualByComparingTo("0.00")
+        assertThat(finalCard.getBalance()).isEqualByComparingTo("0.00")
                 .as("Balance must be exactly 0 after 30 successful spends of £10");
     }
 
@@ -142,8 +142,8 @@ class ConcurrencyIntegrationTest {
             tasks.add(() -> {
                 try {
                     startLatch.await();
-                    Transaction tx = cardService.spend(card.id(), spendAmount, "mix-spend-" + idx, null);
-                    if (tx.status() == TransactionStatus.SUCCESSFUL) spendSuccess.incrementAndGet();
+                    Transaction tx = cardService.spend(card.getId(), spendAmount, "mix-spend-" + idx, null);
+                    if (tx.getStatus() == TransactionStatus.SUCCESSFUL) spendSuccess.incrementAndGet();
                 } finally { doneLatch.countDown(); }
                 return null;
             });
@@ -154,8 +154,8 @@ class ConcurrencyIntegrationTest {
             tasks.add(() -> {
                 try {
                     startLatch.await();
-                    Transaction tx = cardService.topUp(card.id(), topUpAmount, "mix-topup-" + idx, null);
-                    if (tx.status() == TransactionStatus.SUCCESSFUL) topUpSuccess.incrementAndGet();
+                    Transaction tx = cardService.topUp(card.getId(), topUpAmount, "mix-topup-" + idx, null);
+                    if (tx.getStatus() == TransactionStatus.SUCCESSFUL) topUpSuccess.incrementAndGet();
                 } finally { doneLatch.countDown(); }
                 return null;
             });
@@ -167,12 +167,12 @@ class ConcurrencyIntegrationTest {
         executor.shutdown();
 
         // Final balance = 100 + (topUpSuccess * 10) - (spendSuccess * 5)
-        Card finalCard = cardService.getCard(card.id());
+        Card finalCard = cardService.getCard(card.getId());
         BigDecimal expectedBalance = new BigDecimal("100.00")
                 .add(new BigDecimal(topUpSuccess.get()).multiply(topUpAmount))
                 .subtract(new BigDecimal(spendSuccess.get()).multiply(spendAmount));
 
-        assertThat(finalCard.balance())
+        assertThat(finalCard.getBalance())
                 .isEqualByComparingTo(expectedBalance)
                 .isGreaterThanOrEqualTo(BigDecimal.ZERO);
     }

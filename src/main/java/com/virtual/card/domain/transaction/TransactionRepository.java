@@ -1,25 +1,23 @@
 package com.virtual.card.domain.transaction;
 
-import java.math.BigDecimal;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Port (interface) for transaction persistence operations.
+ * Spring Data JPA repository for {@link Transaction} entities.
  */
-public interface TransactionRepository {
+public interface TransactionRepository extends JpaRepository<Transaction, UUID> {
 
     /**
-     * Persists a new transaction record and returns the saved state.
+     * Returns all transactions for a card ordered by creation time descending.
      */
-    Transaction create(UUID cardId, TransactionType type, BigDecimal amount,
-                       TransactionStatus status, String idempotencyKey, String description);
-
-    /**
-     * Returns all transactions for a card, ordered by creation time descending.
-     */
-    List<Transaction> findByCardId(UUID cardId);
+    @Query("SELECT t FROM Transaction t WHERE t.card.id = :cardId ORDER BY t.createdAt DESC")
+    List<Transaction> findByCardId(@Param("cardId") UUID cardId);
 
     /**
      * Finds a transaction by its idempotency key.

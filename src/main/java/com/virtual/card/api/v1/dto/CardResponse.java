@@ -31,12 +31,12 @@ public record CardResponse(
 ) {
     public static CardResponse from(Card card) {
         return new CardResponse(
-                card.id(),
-                card.cardholderName(),
-                card.balance(),
-                card.status(),
-                card.expiresAt(),
-                card.createdAt()
+                card.getId(),
+                card.getCardholderName(),
+                card.getBalance(),
+                card.getStatus(),
+                card.getExpiresAt(),
+                card.getCreatedAt()
         );
     }
 }
