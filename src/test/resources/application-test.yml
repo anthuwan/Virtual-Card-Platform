@@ -1,0 +1,27 @@
+spring:
+  datasource:
+    # Overridden at runtime by @DynamicPropertySource in integration tests (Testcontainers)
+    url: jdbc:tc:postgresql:16:///virtualcard
+    username: test
+    password: test
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  jooq:
+    sql-dialect: POSTGRES
+
+app:
+  rate-limit:
+    capacity: 1000
+    refill-tokens: 1000
+    refill-seconds: 60
+  card:
+    default-expiry-months: 36
+    expiry-check-cron: "0 0 * * * *"
+
+logging:
+  level:
+    com.malta.card: DEBUG

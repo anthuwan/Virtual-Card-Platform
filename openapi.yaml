@@ -1,0 +1,377 @@
+openapi: 3.0.3
+info:
+  title: Virtual Card Issuance Platform API
+  description: |
+    REST API for issuing virtual cards, loading funds, and processing spend transactions.
+
+    ## Key Design Notes
+    - All financial amounts use decimal with 4 decimal places precision
+    - Idempotency is supported on mutating operations via the `Idempotency-Key` header
+    - Insufficient-funds spend returns HTTP 200 with `status: DECLINED` (not an error)
+    - Rate limiting: 100 requests/minute per IP (configurable)
+  version: 1.0.0
+  contact:
+    name: Virtual Card Platform Team
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+
+tags:
+  - name: Cards
+    description: Virtual card lifecycle management
+  - name: Transactions
+    description: Financial operations on cards
+
+paths:
+  /cards:
+    post:
+      tags: [Cards]
+      summary: Issue a new virtual card
+      operationId: createCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCardRequest'
+            example:
+              cardholderName: "Jane Smith"
+              initialBalance: 250.00
+      responses:
+        '201':
+          description: Card created successfully
+          headers:
+            Location:
+              description: URL of the newly created card
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /cards/{cardId}:
+    get:
+      tags: [Cards]
+      summary: Retrieve card details
+      operationId: getCard
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+      responses:
+        '200':
+          description: Card found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /cards/{cardId}/block:
+    patch:
+      tags: [Cards]
+      summary: Block a card
+      description: Suspends an ACTIVE card. Spending and top-ups are disabled until unblocked.
+      operationId: blockCard
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+      responses:
+        '200':
+          description: Card blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/CardNotActive'
+
+  /cards/{cardId}/close:
+    patch:
+      tags: [Cards]
+      summary: Close a card permanently
+      description: Permanently closes a card. This action is irreversible.
+      operationId: closeCard
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+      responses:
+        '200':
+          description: Card closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /cards/{cardId}/spend:
+    post:
+      tags: [Transactions]
+      summary: Spend from a card
+      description: |
+        Deducts the specified amount from the card balance.
+
+        **Important:** If funds are insufficient, the response will be HTTP 200
+        with `status: "DECLINED"` — this is not an error condition but a business
+        outcome. The declined transaction is persisted for audit purposes.
+
+        Supports idempotent retries via the `Idempotency-Key` header.
+      operationId: spend
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoneyOperationRequest'
+            example:
+              amount: 49.99
+              description: "Amazon purchase"
+      responses:
+        '200':
+          description: Transaction processed (check `status` field)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/CardNotActive'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /cards/{cardId}/top-up:
+    post:
+      tags: [Transactions]
+      summary: Top up a card
+      description: |
+        Adds funds to an ACTIVE card.
+        Supports idempotent retries via the `Idempotency-Key` header.
+      operationId: topUp
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoneyOperationRequest'
+            example:
+              amount: 100.00
+              description: "Monthly allowance"
+      responses:
+        '200':
+          description: Funds added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/CardNotActive'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /cards/{cardId}/transactions:
+    get:
+      tags: [Transactions]
+      summary: Retrieve transaction history
+      description: Returns all transactions for a card in descending chronological order.
+      operationId: getTransactions
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+      responses:
+        '200':
+          description: Transaction list (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TransactionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  parameters:
+    CardId:
+      name: cardId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Unique identifier of the card
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 255
+      description: |
+        Client-generated unique key for safe retries. If a request with this
+        key was already processed, the original response is returned without
+        re-executing the operation.
+      example: "txn-550e8400-e29b-41d4-a716-446655440000"
+
+  schemas:
+    CreateCardRequest:
+      type: object
+      required: [cardholderName, initialBalance]
+      properties:
+        cardholderName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: "Jane Smith"
+        initialBalance:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 250.00
+        expiresAt:
+          type: string
+          format: date-time
+          description: Optional custom expiry. Defaults to 3 years from now.
+          example: "2029-01-01T00:00:00"
+
+    CardResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        cardholderName:
+          type: string
+        balance:
+          type: number
+          format: decimal
+        status:
+          $ref: '#/components/schemas/CardStatus'
+        expiresAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    MoneyOperationRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: number
+          format: decimal
+          minimum: 0.01
+          example: 49.99
+        description:
+          type: string
+          maxLength: 500
+          example: "Merchant payment"
+
+    TransactionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        cardId:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/TransactionType'
+        amount:
+          type: number
+          format: decimal
+        status:
+          $ref: '#/components/schemas/TransactionStatus'
+        description:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    CardStatus:
+      type: string
+      enum: [ACTIVE, BLOCKED, CLOSED, EXPIRED]
+
+    TransactionType:
+      type: string
+      enum: [SPEND, TOP_UP]
+
+    TransactionStatus:
+      type: string
+      enum: [SUCCESSFUL, DECLINED, PENDING]
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "CARD_NOT_FOUND"
+        message:
+          type: string
+          example: "Card not found: 550e8400-e29b-41d4-a716-446655440000"
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        timestamp:
+          type: string
+          format: date-time
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    CardNotActive:
+      description: Card is not in ACTIVE status
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    RateLimitError:
+      description: Too many requests — rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until the rate limit window resets
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
