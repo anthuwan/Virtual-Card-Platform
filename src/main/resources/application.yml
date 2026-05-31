@@ -56,6 +56,18 @@ springdoc:
     path: /swagger-ui.html
     operationsSorter: method
 
+# Resilience4j — Circuit Breaker for FraudCheckService
+resilience4j:
+  circuitbreaker:
+    instances:
+      fraudCheck:
+        sliding-window-size: 10          # evaluate last 10 calls
+        failure-rate-threshold: 50       # open circuit if 50% fail
+        wait-duration-in-open-state: 30s # wait 30s before half-open
+        permitted-calls-in-half-open-state: 3
+        slow-call-duration-threshold: 2s # calls > 2s count as failures
+        slow-call-rate-threshold: 80
+
 # Application configuration
 app:
   rate-limit:
@@ -65,3 +77,5 @@ app:
   card:
     default-expiry-months: 36   # cards expire in 3 years by default
     expiry-check-cron: "0 0 * * * *"  # run every hour
+  outbox:
+    poll-interval-ms: 5000      # poll outbox every 5 seconds

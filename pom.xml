@@ -92,6 +92,19 @@
             <artifactId>caffeine</artifactId>
         </dependency>
 
+        <!-- Resilience4j - Circuit Breaker -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot3</artifactId>
+            <version>2.2.0</version>
+        </dependency>
+
+        <!-- Spring Retry - for @Retryable on optimistic lock conflicts -->
+        <dependency>
+            <groupId>org.springframework.retry</groupId>
+            <artifactId>spring-retry</artifactId>
+        </dependency>
+
         <!-- Async support -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

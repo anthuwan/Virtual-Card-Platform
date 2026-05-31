@@ -11,9 +11,13 @@ import com.virtual.card.infrastructure.audit.TransactionAuditEvent;
 import com.virtual.card.infrastructure.cache.CardCacheService;
 import com.virtual.card.infrastructure.fraud.FraudCheckService;
 import com.virtual.card.infrastructure.metrics.CardMetrics;
+import com.virtual.card.infrastructure.outbox.OutboxService;
+import jakarta.persistence.OptimisticLockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -53,6 +57,7 @@ public class CardService {
     private final CardCacheService cardCacheService;
     private final FraudCheckService fraudCheckService;
     private final CardEventProcessor cardEventProcessor;
+    private final OutboxService outboxService;
 
     public CardService(CardRepository cardRepository,
                        TransactionRepository transactionRepository,
@@ -60,7 +65,8 @@ public class CardService {
                        ApplicationEventPublisher eventPublisher,
                        CardCacheService cardCacheService,
                        FraudCheckService fraudCheckService,
-                       CardEventProcessor cardEventProcessor) {
+                       CardEventProcessor cardEventProcessor,
+                       OutboxService outboxService) {
         this.cardRepository = cardRepository;
         this.transactionRepository = transactionRepository;
         this.metrics = metrics;
@@ -68,6 +74,7 @@ public class CardService {
         this.cardCacheService = cardCacheService;
         this.fraudCheckService = fraudCheckService;
         this.cardEventProcessor = cardEventProcessor;
+        this.outboxService = outboxService;
     }
 
     /**
@@ -108,7 +115,17 @@ public class CardService {
      *
      * <p>If funds are insufficient, the transaction is recorded as DECLINED — not thrown
      * as an error. Declined transactions are persisted for audit and idempotency purposes.
+     *
+     * <p>{@code @Retryable} transparently retries up to 3 times on
+     * {@link OptimisticLockException} — which occurs when two concurrent requests
+     * read the same {@code @Version} and one loses the race. Exponential backoff
+     * (50ms, 100ms) reduces contention on retry.
      */
+    @Retryable(
+        retryFor = OptimisticLockException.class,
+        maxAttempts = 3,
+        backoff = @Backoff(delay = 50, multiplier = 2)
+    )
     public Transaction spend(UUID cardId, BigDecimal amount, String idempotencyKey, String description) {
         log.info("Spend request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, idempotencyKey);
 
@@ -171,7 +188,10 @@ public class CardService {
         metrics.recordTransactionAmount(amount);
         eventPublisher.publishEvent(new TransactionAuditEvent(this, tx));
         cardCacheService.refreshCard(card); // update cache with new balance
-        cardEventProcessor.processSpendEvent(tx); // async: Kafka + notify + webhook
+        // Outbox: write event in same DB transaction — guarantees at-least-once Kafka delivery
+        outboxService.saveEvent("TRANSACTION", tx.getId(), "card.spend.successful",
+                String.format("{\"cardId\":\"%s\",\"amount\":\"%s\",\"txId\":\"%s\"}", cardId, amount, tx.getId()));
+        cardEventProcessor.processSpendEvent(tx); // async: notify + webhook
 
         log.info("Spend successful: cardId={}, amount={}, newBalance={}, txId={}",
                 cardId, amount, newBalance, tx.getId());
@@ -180,7 +200,15 @@ public class CardService {
 
     /**
      * Adds {@code amount} to the card balance.
+     *
+     * <p>{@code @Retryable} handles {@link OptimisticLockException} transparently —
+     * same strategy as {@link #spend}.
      */
+    @Retryable(
+        retryFor = OptimisticLockException.class,
+        maxAttempts = 3,
+        backoff = @Backoff(delay = 50, multiplier = 2)
+    )
     public Transaction topUp(UUID cardId, BigDecimal amount, String idempotencyKey, String description) {
         log.info("TopUp request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, idempotencyKey);
 
@@ -216,7 +244,10 @@ public class CardService {
         metrics.recordTransactionAmount(amount);
         eventPublisher.publishEvent(new TransactionAuditEvent(this, tx));
         cardCacheService.refreshCard(card); // update cache with new balance
-        cardEventProcessor.processTopUpEvent(tx); // async: Kafka + notify + webhook
+        // Outbox: write event in same DB transaction — guarantees at-least-once Kafka delivery
+        outboxService.saveEvent("TRANSACTION", tx.getId(), "card.topup.successful",
+                String.format("{\"cardId\":\"%s\",\"amount\":\"%s\",\"txId\":\"%s\"}", cardId, amount, tx.getId()));
+        cardEventProcessor.processTopUpEvent(tx); // async: notify + webhook
 
         log.info("TopUp successful: cardId={}, amount={}, newBalance={}, txId={}",
                 cardId, amount, newBalance, tx.getId());

@@ -1,5 +1,6 @@
 package com.virtual.card.infrastructure.fraud;
 
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -39,30 +40,49 @@ public class FraudCheckService {
     /**
      * Returns {@code true} if the spend looks fraudulent and should be blocked.
      *
-     * <p>TODO: call fraud provider API / rules engine here.
+     * <p>Wrapped in a Resilience4j circuit breaker ({@code fraudCheck}).
+     * If the fraud service is slow or failing, the circuit opens after
+     * {@code slidingWindowSize} failures and falls back to {@link #fraudFallback}
+     * — defaulting to {@code false} (allow spend) to prevent service disruption.
      *
-     * @param cardId  the card being charged
-     * @param amount  the requested spend amount
-     * @return {@code false} always (placeholder — no fraud detection implemented)
+     * <p>TODO: call fraud provider API / rules engine here.
      */
+    @CircuitBreaker(name = "fraudCheck", fallbackMethod = "fraudFallback")
     public boolean isSuspicious(UUID cardId, BigDecimal amount) {
         log.debug("[FRAUD-PLACEHOLDER] Fraud check skipped: cardId={}, amount={} — always CLEAN", cardId, amount);
-        // TODO: implement real fraud check
-        // Example: return fraudClient.getRiskScore(cardId, amount) > RISK_THRESHOLD;
+        // TODO: return fraudClient.getRiskScore(cardId, amount) > RISK_THRESHOLD;
         return false;
     }
 
     /**
      * Checks velocity — too many transactions in a short window.
      *
-     * <p>TODO: query recent transaction count from Redis or DB and compare to threshold.
+     * <p>Circuit breaker protected — falls back to {@code false} if service is unavailable.
      *
-     * @param cardId the card to check
-     * @return {@code false} always (placeholder)
+     * <p>TODO: query recent transaction count from Redis or DB and compare to threshold.
      */
+    @CircuitBreaker(name = "fraudCheck", fallbackMethod = "velocityFallback")
     public boolean isVelocityBreached(UUID cardId) {
         log.debug("[FRAUD-PLACEHOLDER] Velocity check skipped: cardId={}", cardId);
         // TODO: count transactions in last N seconds and compare to limit
+        return false;
+    }
+
+    // ─── Circuit breaker fallbacks ────────────────────────────────────────────
+
+    /**
+     * Fallback when fraud service circuit is OPEN.
+     * Defaults to allowing the spend — availability over strict fraud blocking.
+     * Alert should fire in production when this is invoked.
+     */
+    private boolean fraudFallback(UUID cardId, BigDecimal amount, Throwable ex) {
+        log.warn("[FRAUD-CB-FALLBACK] Circuit open — skipping fraud check: cardId={}, error={}", cardId, ex.getMessage());
+        // TODO: increment a "fraud_check_skipped" metric and trigger an alert
+        return false; // fail-open: allow spend when fraud service is down
+    }
+
+    private boolean velocityFallback(UUID cardId, Throwable ex) {
+        log.warn("[FRAUD-CB-FALLBACK] Circuit open — skipping velocity check: cardId={}, error={}", cardId, ex.getMessage());
         return false;
     }
 }

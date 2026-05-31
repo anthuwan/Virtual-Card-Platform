@@ -10,6 +10,7 @@ import com.virtual.card.infrastructure.async.CardEventProcessor;
 import com.virtual.card.infrastructure.cache.CardCacheService;
 import com.virtual.card.infrastructure.fraud.FraudCheckService;
 import com.virtual.card.infrastructure.metrics.CardMetrics;
+import com.virtual.card.infrastructure.outbox.OutboxService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -42,6 +43,7 @@ class CardServiceTest {
     @Mock CardCacheService cardCacheService;
     @Mock FraudCheckService fraudCheckService;
     @Mock CardEventProcessor cardEventProcessor;
+    @Mock OutboxService outboxService;
 
     @InjectMocks CardService cardService;
 

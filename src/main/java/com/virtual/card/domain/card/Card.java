@@ -54,6 +54,25 @@ public class Card {
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
 
+    /**
+     * Optimistic locking version counter.
+     *
+     * <p>JPA increments this on every UPDATE. If two concurrent transactions
+     * read version=5 and both try to update, only the first succeeds — the second
+     * gets {@code OptimisticLockException} because the DB row now has version=6.
+     *
+     * <p>This is a defence-in-depth complement to pessimistic locking:
+     * pessimistic locking serialises requests at the DB level;
+     * optimistic locking catches any edge cases that slip through
+     * (e.g. cache reads that bypass the lock).
+     *
+     * <p>Callers should use {@code @Retryable(OptimisticLockException.class)}
+     * to transparently retry on conflict. See {@link com.virtual.card.domain.card.CardService}.
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version = 0L;
+
     // JPA requires a no-arg constructor
     protected Card() {}
 
@@ -85,6 +104,7 @@ public class Card {
     public LocalDateTime getExpiresAt()  { return expiresAt; }
     public LocalDateTime getCreatedAt()  { return createdAt; }
     public LocalDateTime getUpdatedAt()  { return updatedAt; }
+    public Long getVersion()             { return version; }
 
     // ─── Setters (used by service layer) ─────────────────────────────────────
 
