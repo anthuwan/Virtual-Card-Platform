@@ -7,6 +7,7 @@ import com.virtual.card.api.v1.dto.TransactionResponse;
 import com.virtual.card.domain.card.Card;
 import com.virtual.card.domain.card.CardService;
 import com.virtual.card.domain.transaction.Transaction;
+import com.virtual.card.infrastructure.security.CardSecurityService;
 import com.virtual.card.scheduler.CardExpirationProperties;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -42,10 +43,14 @@ public class CardController {
 
     private final CardService cardService;
     private final CardExpirationProperties expirationProperties;
+    private final CardSecurityService cardSecurityService;
 
-    public CardController(CardService cardService, CardExpirationProperties expirationProperties) {
+    public CardController(CardService cardService,
+                          CardExpirationProperties expirationProperties,
+                          CardSecurityService cardSecurityService) {
         this.cardService = cardService;
         this.expirationProperties = expirationProperties;
+        this.cardSecurityService = cardSecurityService;
     }
 
     // ─── Card Lifecycle ───────────────────────────────────────────────────────
@@ -65,8 +70,10 @@ public class CardController {
                 ? request.expiresAt()
                 : LocalDateTime.now().plusMonths(expirationProperties.defaultExpiryMonths());
 
-        Card card = cardService.createCard(request.cardholderName(), request.initialBalance(), expiresAt);
-        log.info("Card issued via API: id={}", card.getId());
+        // Attach the authenticated user's ID as the card owner
+        String ownerId = cardSecurityService.getAuthenticatedUserId();
+        Card card = cardService.createCard(request.cardholderName(), request.initialBalance(), expiresAt, ownerId);
+        log.info("Card issued via API: id={}, ownerId={}", card.getId(), ownerId);
 
         return ResponseEntity
                 .created(URI.create("/api/v1/cards/" + card.getId()))
@@ -83,6 +90,7 @@ public class CardController {
             }
     )
     public CardResponse getCard(@PathVariable UUID cardId) {
+        cardSecurityService.assertOwnership(cardId);
         return CardResponse.from(cardService.getCard(cardId));
     }
 
@@ -90,6 +98,7 @@ public class CardController {
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Block a card", description = "Suspends an ACTIVE card. Spending and top-ups are disabled.")
     public CardResponse blockCard(@PathVariable UUID cardId) {
+        cardSecurityService.assertOwnership(cardId);
         return CardResponse.from(cardService.blockCard(cardId));
     }
 
@@ -97,6 +106,7 @@ public class CardController {
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Close a card", description = "Permanently closes a card. This action is irreversible.")
     public CardResponse closeCard(@PathVariable UUID cardId) {
+        cardSecurityService.assertOwnership(cardId);
         return CardResponse.from(cardService.closeCard(cardId));
     }
 
@@ -124,6 +134,7 @@ public class CardController {
             @Valid @RequestBody MoneyOperationRequest request,
             @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
 
+        cardSecurityService.assertOwnership(cardId);
         Transaction tx = cardService.spend(cardId, request.amount(), idempotencyKey, request.description());
         return TransactionResponse.from(tx);
     }
@@ -149,6 +160,7 @@ public class CardController {
             @Valid @RequestBody MoneyOperationRequest request,
             @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
 
+        cardSecurityService.assertOwnership(cardId);
         Transaction tx = cardService.topUp(cardId, request.amount(), idempotencyKey, request.description());
         return TransactionResponse.from(tx);
     }
@@ -163,6 +175,7 @@ public class CardController {
             }
     )
     public List<TransactionResponse> getTransactions(@PathVariable UUID cardId) {
+        cardSecurityService.assertOwnership(cardId);
         return cardService.getTransactionHistory(cardId).stream()
                 .map(TransactionResponse::from)
                 .toList();

@@ -70,7 +70,7 @@ class CardServiceTest {
             when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
             Card result = cardService.createCard("Jane Smith", new BigDecimal("100.00"),
-                    LocalDateTime.now().plusYears(3));
+                    LocalDateTime.now().plusYears(3), "user-123");
 
             assertThat(result.getCardholderName()).isEqualTo("Jane Smith");
             assertThat(result.getBalance()).isEqualByComparingTo("100.00");
@@ -84,7 +84,7 @@ class CardServiceTest {
         void noTransactionForZeroBalance() {
             when(cardRepository.save(any(Card.class))).thenAnswer(inv -> inv.getArgument(0));
 
-            cardService.createCard("Jane Smith", BigDecimal.ZERO, LocalDateTime.now().plusYears(3));
+            cardService.createCard("Jane Smith", BigDecimal.ZERO, LocalDateTime.now().plusYears(3), "user-123");
 
             verify(transactionRepository, never()).save(any());
         }

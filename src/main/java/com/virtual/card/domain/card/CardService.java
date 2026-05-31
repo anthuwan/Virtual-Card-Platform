@@ -80,10 +80,10 @@ public class CardService {
     /**
      * Issues a new virtual card with the given cardholder name and initial balance.
      */
-    public Card createCard(String cardholderName, BigDecimal initialBalance, LocalDateTime expiresAt) {
-        log.info("Creating card for cardholder='{}', initialBalance={}", cardholderName, initialBalance);
+    public Card createCard(String cardholderName, BigDecimal initialBalance, LocalDateTime expiresAt, String ownerId) {
+        log.info("Creating card for cardholder='{}', initialBalance={}, ownerId={}", cardholderName, initialBalance, ownerId);
 
-        Card card = new Card(cardholderName, initialBalance, CardStatus.ACTIVE, expiresAt);
+        Card card = new Card(cardholderName, initialBalance, CardStatus.ACTIVE, expiresAt, ownerId);
         cardRepository.save(card);
 
         // Record initial load as a transaction for a complete audit trail

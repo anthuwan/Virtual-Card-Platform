@@ -18,6 +18,14 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
 
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Replace with your identity provider's issuer URI (Keycloak, Auth0, Cognito, etc.)
+          # Spring Boot auto-fetches the JWKS from {issuer-uri}/.well-known/openid-configuration
+          issuer-uri: ${JWT_ISSUER_URI:http://localhost:9090/realms/virtual-card}
+
   cache:
     # Using Caffeine (in-process). To switch to Redis for multi-instance deployments:
     # type: redis

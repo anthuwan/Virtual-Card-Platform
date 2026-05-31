@@ -36,6 +36,13 @@ public class Card {
     @Column(name = "cardholder_name", nullable = false, length = 255)
     private String cardholderName;
 
+    /**
+     * JWT subject claim (`sub`) of the authenticated user who owns this card.
+     * Used to enforce that cardholders can only access their own cards.
+     */
+    @Column(name = "owner_id", length = 255)
+    private String ownerId;
+
     @Column(name = "balance", nullable = false, precision = 19, scale = 4)
     private BigDecimal balance;
 
@@ -83,6 +90,11 @@ public class Card {
         this.expiresAt = expiresAt;
     }
 
+    public Card(String cardholderName, BigDecimal balance, CardStatus status, LocalDateTime expiresAt, String ownerId) {
+        this(cardholderName, balance, status, expiresAt);
+        this.ownerId = ownerId;
+    }
+
     // ─── Business Methods ─────────────────────────────────────────────────────
 
     /** Returns true if this card can perform financial operations. */
@@ -99,6 +111,7 @@ public class Card {
 
     public UUID getId()                  { return id; }
     public String getCardholderName()    { return cardholderName; }
+    public String getOwnerId()           { return ownerId; }
     public BigDecimal getBalance()       { return balance; }
     public CardStatus getStatus()        { return status; }
     public LocalDateTime getExpiresAt()  { return expiresAt; }
