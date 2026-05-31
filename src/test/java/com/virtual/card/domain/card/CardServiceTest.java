@@ -6,6 +6,9 @@ import com.virtual.card.domain.transaction.TransactionStatus;
 import com.virtual.card.domain.transaction.TransactionType;
 import com.virtual.card.exception.CardNotFoundException;
 import com.virtual.card.exception.CardNotActiveException;
+import com.virtual.card.infrastructure.async.CardEventProcessor;
+import com.virtual.card.infrastructure.cache.CardCacheService;
+import com.virtual.card.infrastructure.fraud.FraudCheckService;
 import com.virtual.card.infrastructure.metrics.CardMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -36,6 +39,9 @@ class CardServiceTest {
     @Mock TransactionRepository transactionRepository;
     @Mock CardMetrics metrics;
     @Mock ApplicationEventPublisher eventPublisher;
+    @Mock CardCacheService cardCacheService;
+    @Mock FraudCheckService fraudCheckService;
+    @Mock CardEventProcessor cardEventProcessor;
 
     @InjectMocks CardService cardService;
 
@@ -221,6 +227,7 @@ class CardServiceTest {
         @DisplayName("returns transactions for existing card")
         void returnsHistory() {
             when(cardRepository.existsById(cardId)).thenReturn(true);
+            when(cardCacheService.getCard(cardId)).thenReturn(activeCard);
             when(transactionRepository.findByCardId(cardId)).thenReturn(List.of());
 
             List<Transaction> result = cardService.getTransactionHistory(cardId);
@@ -232,6 +239,7 @@ class CardServiceTest {
         @DisplayName("throws CardNotFoundException for unknown card")
         void throwsForUnknownCard() {
             when(cardRepository.existsById(cardId)).thenReturn(false);
+            when(cardCacheService.getCard(cardId)).thenThrow(new CardNotFoundException(cardId));
 
             assertThatThrownBy(() -> cardService.getTransactionHistory(cardId))
                     .isInstanceOf(CardNotFoundException.class);

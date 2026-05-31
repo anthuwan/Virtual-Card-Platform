@@ -18,6 +18,15 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
 
+  cache:
+    # Using Caffeine (in-process). To switch to Redis for multi-instance deployments:
+    # type: redis
+    # data.redis.host: localhost
+    # data.redis.port: 6379
+    type: caffeine
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=5s
+
   jpa:
     hibernate:
       ddl-auto: validate

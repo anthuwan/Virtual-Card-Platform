@@ -6,7 +6,10 @@ import com.virtual.card.domain.transaction.TransactionStatus;
 import com.virtual.card.domain.transaction.TransactionType;
 import com.virtual.card.exception.CardNotFoundException;
 import com.virtual.card.exception.CardNotActiveException;
+import com.virtual.card.infrastructure.async.CardEventProcessor;
 import com.virtual.card.infrastructure.audit.TransactionAuditEvent;
+import com.virtual.card.infrastructure.cache.CardCacheService;
+import com.virtual.card.infrastructure.fraud.FraudCheckService;
 import com.virtual.card.infrastructure.metrics.CardMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,15 +50,24 @@ public class CardService {
     private final TransactionRepository transactionRepository;
     private final CardMetrics metrics;
     private final ApplicationEventPublisher eventPublisher;
+    private final CardCacheService cardCacheService;
+    private final FraudCheckService fraudCheckService;
+    private final CardEventProcessor cardEventProcessor;
 
     public CardService(CardRepository cardRepository,
                        TransactionRepository transactionRepository,
                        CardMetrics metrics,
-                       ApplicationEventPublisher eventPublisher) {
+                       ApplicationEventPublisher eventPublisher,
+                       CardCacheService cardCacheService,
+                       FraudCheckService fraudCheckService,
+                       CardEventProcessor cardEventProcessor) {
         this.cardRepository = cardRepository;
         this.transactionRepository = transactionRepository;
         this.metrics = metrics;
         this.eventPublisher = eventPublisher;
+        this.cardCacheService = cardCacheService;
+        this.fraudCheckService = fraudCheckService;
+        this.cardEventProcessor = cardEventProcessor;
     }
 
     /**
@@ -76,18 +88,19 @@ public class CardService {
         }
 
         metrics.incrementCardCreated();
+        cardEventProcessor.processCardCreatedEvent(card); // async: Kafka + webhook
         log.info("Card created: id={}, cardholder='{}'", card.getId(), cardholderName);
         return card;
     }
 
     /**
-     * Retrieves current card details. Throws {@link CardNotFoundException} if not found.
+     * Retrieves current card details. Returns from cache if available; falls back to DB.
+     * Throws {@link CardNotFoundException} if not found.
      */
     @Transactional(readOnly = true)
     public Card getCard(UUID cardId) {
         log.debug("Fetching card: id={}", cardId);
-        return cardRepository.findById(cardId)
-                .orElseThrow(() -> new CardNotFoundException(cardId));
+        return cardCacheService.getCard(cardId);
     }
 
     /**
@@ -118,6 +131,18 @@ public class CardService {
             throw new CardNotActiveException(cardId, card.getStatus());
         }
 
+        // Fraud check — placeholder always returns false
+        if (fraudCheckService.isSuspicious(cardId, amount) || fraudCheckService.isVelocityBreached(cardId)) {
+            log.warn("Spend blocked — fraud suspected: cardId={}, amount={}", cardId, amount);
+            Transaction fraudDeclined = new Transaction(
+                    card, TransactionType.SPEND, amount,
+                    TransactionStatus.DECLINED, idempotencyKey, "Fraud suspected");
+            transactionRepository.save(fraudDeclined);
+            metrics.incrementSpendDeclined();
+            cardEventProcessor.processSpendEvent(fraudDeclined); // async: notify + webhook
+            return fraudDeclined;
+        }
+
         // Insufficient funds → record DECLINED, return (no exception)
         if (card.getBalance().compareTo(amount) < 0) {
             log.warn("Spend declined — insufficient funds: cardId={}, available={}, requested={}",
@@ -129,6 +154,7 @@ public class CardService {
 
             metrics.incrementSpendDeclined();
             eventPublisher.publishEvent(new TransactionAuditEvent(this, declined));
+            cardEventProcessor.processSpendEvent(declined); // async: notify + webhook
             return declined;
         }
 
@@ -144,6 +170,8 @@ public class CardService {
         metrics.incrementSpendSuccess();
         metrics.recordTransactionAmount(amount);
         eventPublisher.publishEvent(new TransactionAuditEvent(this, tx));
+        cardCacheService.refreshCard(card); // update cache with new balance
+        cardEventProcessor.processSpendEvent(tx); // async: Kafka + notify + webhook
 
         log.info("Spend successful: cardId={}, amount={}, newBalance={}, txId={}",
                 cardId, amount, newBalance, tx.getId());
@@ -187,6 +215,8 @@ public class CardService {
         metrics.incrementTopUpSuccess();
         metrics.recordTransactionAmount(amount);
         eventPublisher.publishEvent(new TransactionAuditEvent(this, tx));
+        cardCacheService.refreshCard(card); // update cache with new balance
+        cardEventProcessor.processTopUpEvent(tx); // async: Kafka + notify + webhook
 
         log.info("TopUp successful: cardId={}, amount={}, newBalance={}, txId={}",
                 cardId, amount, newBalance, tx.getId());
@@ -216,7 +246,10 @@ public class CardService {
             throw new CardNotActiveException(cardId, card.getStatus());
         }
         card.setStatus(CardStatus.BLOCKED);
-        return cardRepository.save(card);
+        Card saved = cardRepository.save(card);
+        cardCacheService.refreshCard(saved); // update cache with BLOCKED status
+        cardEventProcessor.processCardStatusEvent(saved); // async: Kafka + notify + webhook
+        return saved;
     }
 
     /**
@@ -227,7 +260,10 @@ public class CardService {
         Card card = cardRepository.findById(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
         card.setStatus(CardStatus.CLOSED);
-        return cardRepository.save(card);
+        Card saved = cardRepository.save(card);
+        cardCacheService.refreshCard(saved); // update cache with CLOSED status
+        cardEventProcessor.processCardStatusEvent(saved); // async: Kafka + webhook
+        return saved;
     }
 
     /**
@@ -238,6 +274,8 @@ public class CardService {
         expiring.forEach(card -> {
             card.setStatus(CardStatus.EXPIRED);
             cardRepository.save(card);
+            cardCacheService.evictCard(card.getId()); // remove expired card from cache
+            cardEventProcessor.processCardStatusEvent(card); // async: notify + webhook
             log.info("Card expired: id={}, expiredAt={}", card.getId(), card.getExpiresAt());
             metrics.incrementCardExpired();
         });
