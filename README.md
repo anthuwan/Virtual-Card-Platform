@@ -1,6 +1,8 @@
 # Virtual Card Issuance Platform
 
-A robust, scalable, and extensible backend service for issuing virtual cards, processing spend/top-up operations, and tracking transactions — built with Java 21 + Spring Boot 3 + JOOQ + PostgreSQL.
+A robust, scalable, and extensible backend service for issuing virtual cards, processing spend/top-up operations, and tracking transactions — built with Java 21 + Spring Boot 3 + Spring Data JPA + PostgreSQL.
+
+Designed with production-grade concerns in mind: pessimistic + optimistic locking for race condition safety, transactional outbox for guaranteed event delivery, Resilience4j circuit breaker for fault tolerance, Caffeine caching for read performance, and async event processing for Kafka, notifications, and webhooks.
 
 ---
 
@@ -20,8 +22,6 @@ docker-compose up -d
 ### 2. Build and run
 
 ```bash
-# IMPORTANT: JOOQ generates type-safe SQL classes from the schema DDL.
-# This happens automatically during the compile phase.
 mvn spring-boot:run
 ```
 
@@ -81,21 +81,21 @@ A spend with insufficient funds returns **HTTP 200** with `"status": "DECLINED"`
 
 ### Domain Model
 
-The domain layer (`com.virtual.card.domain`) is intentionally **free of infrastructure dependencies** — no JPA annotations, no JOOQ imports. `Card` and `Transaction` are plain Java records. `CardService` contains all business logic and depends only on repository _interfaces_.
+The domain layer (`com.virtual.card.domain`) is structured around **Spring Data JPA**. `Card` and `Transaction` are JPA `@Entity` classes. `CardService` contains all business logic and depends only on repository interfaces (`JpaRepository`).
 
 This hexagonal (ports-and-adapters) structure means:
-- Business rules are unit-testable without starting Spring or a database
-- The persistence technology can be swapped without touching service code
+- Business rules are unit-testable without starting a database (repositories are mocked)
+- The persistence layer is cleanly separated from business logic
 - Future features (e.g. fraud rules, authorization hooks) slot in at the service layer
 
-### Why JOOQ over JPA?
+### Data Access — Spring Data JPA
 
-JOOQ was chosen for several reasons aligned with the requirements:
+Spring Data JPA was chosen to align with the team's existing technology stack:
 
-1. **Type-safe SQL** — JOOQ generates Java classes from the schema DDL (see `target/generated-sources/jooq`). Typos in table/column names become compile errors, not runtime surprises.
-2. **Explicit control** — No hidden lazy-loading, no N+1 surprise queries. Every SQL statement is visible in the repository code.
-3. **Pessimistic locking** — `SELECT ... FOR UPDATE` is expressed naturally: `dsl.selectFrom(CARDS).where(...).forUpdate()`. With JPA this would require `@Lock(PESSIMISTIC_WRITE)` and careful transaction boundary management.
-4. **Complex queries** — JOOQ handles joins, CTEs, and window functions ergonomically. As the platform grows (e.g. balance aggregations, fraud pattern queries), JOOQ scales better than JPQL.
+1. **Pessimistic locking** — `@Lock(LockModeType.PESSIMISTIC_WRITE)` on `findByIdForUpdate()` translates to `SELECT ... FOR UPDATE` in PostgreSQL — same serialisation guarantee as a raw SQL lock.
+2. **Optimistic locking** — `@Version` on the `Card` entity provides defence-in-depth. If two concurrent requests slip past the pessimistic lock, only one UPDATE wins; the other gets `OptimisticLockException` and retries via `@Retryable`.
+3. **Dirty checking** — Modifying a managed entity within a `@Transactional` method auto-saves on commit. No explicit `save()` needed for balance updates.
+4. **Derived queries** — Spring Data generates boilerplate queries (`findById`, `existsById`) automatically, reducing repository code to only what's non-trivial.
 
 ### Concurrency Safety
 
@@ -148,9 +148,12 @@ A `@Scheduled` job runs hourly (configurable via `app.card.expiry-check-cron`) a
 
 | Decision | Chosen approach | Alternative considered | Reason |
 |---|---|---|---|
-| Data access | JOOQ | Spring Data JPA | Type-safe SQL, explicit locking, no N+1 risk |
-| Concurrency | `SELECT FOR UPDATE` | Optimistic locking with version column | Simpler failure model; no retry loops needed |
+| Data access | Spring Data JPA | Raw JDBC | Team alignment; `@Lock`, dirty checking, derived queries reduce boilerplate |
+| Concurrency | Pessimistic + optimistic locking | Optimistic only | Pessimistic serialises at DB level; optimistic `@Version` + `@Retryable` as defence-in-depth |
 | Insufficient funds | Return DECLINED transaction | Throw HTTP 422 | Preserves audit trail; declines are business events not errors |
+| Event delivery | Transactional outbox | Fire-and-forget async | Guarantees at-least-once delivery even if app crashes after DB commit |
+| Fault tolerance | Resilience4j circuit breaker | Timeout only | Prevents cascading failure when fraud service is slow or down |
+| Caching | Caffeine (in-process, TTL 5s) | Redis | Zero infra for prototype; swap to Redis for multi-instance with one config change |
 | Async audit | Spring Events | Kafka | No broker dependency; event bus is transparent to publisher |
 | Rate limiting | Bucket4j in-process | Redis-backed distributed limiter | Sufficient for single-instance; easy to upgrade |
 | Schema management | Flyway | Liquibase | SQL-first, no XML; easy to review in PRs |
@@ -251,7 +254,13 @@ This decouples authorisation from balance update, enabling async fraud screening
 
 ## Learning Notes
 
-**JOOQ DDL-based code generation** — Used `jooq-meta-extensions` (`DDLDatabase`) to generate type-safe Java classes directly from the Flyway migration SQL files without needing a running database at build time. This keeps the build reproducible and CI-friendly. The generated classes live in `target/generated-sources/jooq/` and are produced automatically during `mvn compile`.
+**Spring Data JPA pessimistic locking** — `@Lock(LockModeType.PESSIMISTIC_WRITE)` on a repository method translates to `SELECT ... FOR UPDATE` in PostgreSQL. This serialises concurrent spend/top-up requests on the same card at the database level, preventing lost updates and double-spend conditions.
+
+**Optimistic locking + @Retryable** — `@Version` on the `Card` entity adds a version counter incremented on every UPDATE. If two concurrent transactions read `version=N` and both attempt an update, only one succeeds — the other gets `OptimisticLockException`. `@Retryable` from Spring Retry transparently retries up to 3 times with exponential backoff, handling the conflict without surfacing an error to the caller.
+
+**Transactional outbox** — Writing Kafka events to an `outbox_events` table in the same DB transaction as the business operation eliminates the gap between commit and publish. A scheduler polls PENDING events and publishes them, retrying up to 5 times before marking FAILED. This guarantees at-least-once delivery even if the app crashes mid-flight.
+
+**Resilience4j circuit breaker** — The `@CircuitBreaker` annotation on `FraudCheckService` opens the circuit after 50% failure rate over 10 calls. The fallback method returns `false` (fail-open) so a slow or down fraud service never blocks legitimate spends.
 
 **Bucket4j token bucket** — The token bucket algorithm provides bursty-traffic tolerance (a client can use accumulated tokens in a burst) while enforcing a sustained rate limit. This is preferable to a fixed-window counter which can allow 2× the limit at window boundaries.
 
