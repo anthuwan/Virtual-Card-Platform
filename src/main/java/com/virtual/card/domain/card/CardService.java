@@ -70,6 +70,13 @@ public class CardService {
 
         Card card = cardRepository.create(cardholderName, initialBalance, expiresAt);
 
+        // Record initial load as a transaction for complete audit trail
+        if (initialBalance.compareTo(BigDecimal.ZERO) > 0) {
+            transactionRepository.create(
+                    card.id(), TransactionType.TOP_UP, initialBalance,
+                    TransactionStatus.SUCCESSFUL, null, "Initial card load");
+        }
+
         metrics.incrementCardCreated();
         log.info("Card created: id={}, cardholder='{}'", card.id(), cardholderName);
         return card;
