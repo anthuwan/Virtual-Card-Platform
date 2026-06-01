@@ -111,7 +111,15 @@ public class CardController {
 
     @PatchMapping("/{cardId}/activate")
     @ResponseStatus(HttpStatus.OK)
-    @Operation(summary = "Activate a blocked card", description = "Reactivates a BLOCKED card. Only BLOCKED → ACTIVE is permitted. CLOSED and EXPIRED cards cannot be reactivated.")
+    @Operation(
+            summary = "Activate a blocked card",
+            description = "Reactivates a BLOCKED card. Only BLOCKED → ACTIVE is permitted. CLOSED and EXPIRED cards cannot be reactivated.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Card activated"),
+                    @ApiResponse(responseCode = "404", description = "Card not found"),
+                    @ApiResponse(responseCode = "422", description = "Card is not BLOCKED")
+            }
+    )
     public CardResponse activateCard(@PathVariable UUID cardId) {
         cardSecurityService.assertOwnership(cardId);
         return CardResponse.from(cardService.activateCard(cardId));
@@ -119,7 +127,15 @@ public class CardController {
 
     @PatchMapping("/{cardId}/block")
     @ResponseStatus(HttpStatus.OK)
-    @Operation(summary = "Block a card", description = "Suspends an ACTIVE card. Spending and top-ups are disabled.")
+    @Operation(
+            summary = "Block a card",
+            description = "Suspends an ACTIVE card. Spending and top-ups are disabled.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Card blocked"),
+                    @ApiResponse(responseCode = "404", description = "Card not found"),
+                    @ApiResponse(responseCode = "422", description = "Card is not ACTIVE")
+            }
+    )
     public CardResponse blockCard(@PathVariable UUID cardId) {
         cardSecurityService.assertOwnership(cardId);
         return CardResponse.from(cardService.blockCard(cardId));
@@ -127,7 +143,15 @@ public class CardController {
 
     @PatchMapping("/{cardId}/close")
     @ResponseStatus(HttpStatus.OK)
-    @Operation(summary = "Close a card", description = "Permanently closes a card. This action is irreversible.")
+    @Operation(
+            summary = "Close a card",
+            description = "Permanently closes a card. This action is irreversible.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Card closed"),
+                    @ApiResponse(responseCode = "404", description = "Card not found"),
+                    @ApiResponse(responseCode = "422", description = "Card is already CLOSED or EXPIRED")
+            }
+    )
     public CardResponse closeCard(@PathVariable UUID cardId) {
         cardSecurityService.assertOwnership(cardId);
         return CardResponse.from(cardService.closeCard(cardId));
