@@ -3,6 +3,7 @@ package com.virtual.card.infrastructure.outbox;
 import com.virtual.card.infrastructure.kafka.CardEventPublisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -71,7 +72,7 @@ public class OutboxService {
     @Scheduled(fixedDelayString = "${app.outbox.poll-interval-ms:5000}")
     @Transactional
     public void pollAndPublish() {
-        List<OutboxEvent> pending = outboxEventRepository.findPendingEvents();
+        List<OutboxEvent> pending = outboxEventRepository.findPendingEvents(PageRequest.of(0, 100));
         if (pending.isEmpty()) return;
 
         log.debug("Outbox poller: found {} PENDING events", pending.size());

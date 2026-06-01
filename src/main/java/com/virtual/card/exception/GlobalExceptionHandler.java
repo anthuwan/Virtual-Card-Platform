@@ -72,6 +72,13 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of("RATE_LIMIT_EXCEEDED", ex.getMessage()));
     }
 
+    @ExceptionHandler(IdempotencyConflictException.class)
+    public ResponseEntity<ErrorResponse> handleIdempotencyConflict(IdempotencyConflictException ex) {
+        log.warn("Idempotency conflict: key={}", ex.getIdempotencyKey());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ErrorResponse.of("IDEMPOTENCY_CONFLICT", ex.getMessage()));
+    }
+
     // ─── Validation Exceptions ────────────────────────────────────────────────
 
     /**

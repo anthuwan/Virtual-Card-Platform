@@ -2,9 +2,13 @@ package com.virtual.card.integration;
 
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.*;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -12,15 +16,19 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 
 /**
  * Full-stack integration tests using a real PostgreSQL instance via Testcontainers.
  *
- * <p>These tests exercise the entire HTTP → Service → JOOQ → DB round-trip,
+ * <p>These tests exercise the entire HTTP → Service → JPA → DB round-trip,
  * verifying that all layers work together correctly. The container is shared
  * across all tests in this class for efficiency.
  */
@@ -29,6 +37,8 @@ import static org.hamcrest.Matchers.*;
 @ActiveProfiles("test")
 @DisplayName("Card API Integration Tests")
 class CardIntegrationTest {
+
+    private static final String AUTH_HEADER = "Bearer test-token";
 
     @Container
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
@@ -46,10 +56,14 @@ class CardIntegrationTest {
     @LocalServerPort
     int port;
 
+    @MockBean
+    JwtDecoder jwtDecoder;
+
     @BeforeEach
     void setUp() {
         RestAssured.port = port;
         RestAssured.basePath = "/api/v1";
+        when(jwtDecoder.decode(anyString())).thenReturn(testJwt());
     }
 
     // ─── Card Creation ────────────────────────────────────────────────────────
@@ -57,8 +71,7 @@ class CardIntegrationTest {
     @Test
     @DisplayName("POST /cards — creates card and returns 201 with Location header")
     void createCard_returns201() {
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
                 .body("""
                         {"cardholderName": "Alice Borg", "initialBalance": 500.00}
                         """)
@@ -76,8 +89,7 @@ class CardIntegrationTest {
     @Test
     @DisplayName("POST /cards — returns 400 when cardholder name is blank")
     void createCard_validatesCardholderName() {
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
                 .body("""
                         {"cardholderName": "", "initialBalance": 100.00}
                         """)
@@ -91,8 +103,7 @@ class CardIntegrationTest {
     @Test
     @DisplayName("POST /cards — returns 400 when initial balance is negative")
     void createCard_rejectsNegativeBalance() {
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
                 .body("""
                         {"cardholderName": "Bob", "initialBalance": -10.00}
                         """)
@@ -107,7 +118,7 @@ class CardIntegrationTest {
     @Test
     @DisplayName("GET /cards/{id} — returns 404 for unknown card")
     void getCard_returns404() {
-        given()
+        givenAuth()
         .when()
                 .get("/cards/" + UUID.randomUUID())
         .then()
@@ -124,8 +135,8 @@ class CardIntegrationTest {
         String cardId = createCard("Carol", 200.00);
 
         // Spend 75
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
+                .header("Idempotency-Key", "spend-success-" + UUID.randomUUID())
                 .body("""
                         {"amount": 75.00, "description": "Test purchase"}
                         """)
@@ -138,7 +149,7 @@ class CardIntegrationTest {
                 .body("amount", equalTo(75.0f));
 
         // Verify balance updated
-        given()
+        givenAuth()
         .when()
                 .get("/cards/" + cardId)
         .then()
@@ -150,8 +161,8 @@ class CardIntegrationTest {
     void spend_declinedOnInsufficientFunds() {
         String cardId = createCard("David", 50.00);
 
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
+                .header("Idempotency-Key", "spend-decline-" + UUID.randomUUID())
                 .body("""
                         {"amount": 999.00}
                         """)
@@ -162,7 +173,7 @@ class CardIntegrationTest {
                 .body("status", equalTo("DECLINED"));
 
         // Balance should remain unchanged
-        given()
+        givenAuth()
         .when()
                 .get("/cards/" + cardId)
         .then()
@@ -176,8 +187,7 @@ class CardIntegrationTest {
         String idempotencyKey = "spend-idem-" + UUID.randomUUID();
 
         // First call
-        String txId1 = given()
-                .contentType(ContentType.JSON)
+        String txId1 = givenJsonAuth()
                 .header("Idempotency-Key", idempotencyKey)
                 .body("""
                         {"amount": 100.00}
@@ -190,8 +200,7 @@ class CardIntegrationTest {
                 .extract().path("id");
 
         // Second call with same key — should return identical response
-        String txId2 = given()
-                .contentType(ContentType.JSON)
+        String txId2 = givenJsonAuth()
                 .header("Idempotency-Key", idempotencyKey)
                 .body("""
                         {"amount": 100.00}
@@ -206,7 +215,7 @@ class CardIntegrationTest {
         Assertions.assertEquals(txId1, txId2, "Idempotent calls must return the same transaction ID");
 
         // Balance should reflect only ONE deduction
-        given()
+        givenAuth()
         .when()
                 .get("/cards/" + cardId)
         .then()
@@ -220,8 +229,8 @@ class CardIntegrationTest {
     void topUp_increasesBalance() {
         String cardId = createCard("Frank", 100.00);
 
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
+                .header("Idempotency-Key", "topup-success-" + UUID.randomUUID())
                 .body("""
                         {"amount": 50.00}
                         """)
@@ -232,7 +241,7 @@ class CardIntegrationTest {
                 .body("status", equalTo("SUCCESSFUL"))
                 .body("type", equalTo("TOP_UP"));
 
-        given()
+        givenAuth()
         .when()
                 .get("/cards/" + cardId)
         .then()
@@ -247,7 +256,7 @@ class CardIntegrationTest {
         String cardId = createCard("Grace", 200.00);
 
         // Block the card
-        given()
+        givenAuth()
         .when()
                 .patch("/cards/" + cardId + "/block")
         .then()
@@ -255,8 +264,8 @@ class CardIntegrationTest {
                 .body("status", equalTo("BLOCKED"));
 
         // Attempt to spend — expect 422
-        given()
-                .contentType(ContentType.JSON)
+        givenJsonAuth()
+                .header("Idempotency-Key", "spend-blocked-" + UUID.randomUUID())
                 .body("""
                         {"amount": 10.00}
                         """)
@@ -275,18 +284,22 @@ class CardIntegrationTest {
         String cardId = createCard("Henry", 500.00);
 
         // Top-up
-        given().contentType(ContentType.JSON).body("{\"amount\": 100.00}")
+        givenJsonAuth()
+                .header("Idempotency-Key", "history-topup-" + UUID.randomUUID())
+                .body("{\"amount\": 100.00}")
                 .post("/cards/" + cardId + "/top-up");
         // Spend
-        given().contentType(ContentType.JSON).body("{\"amount\": 50.00}")
+        givenJsonAuth()
+                .header("Idempotency-Key", "history-spend-" + UUID.randomUUID())
+                .body("{\"amount\": 50.00}")
                 .post("/cards/" + cardId + "/spend");
 
-        given()
+        givenAuth()
         .when()
                 .get("/cards/" + cardId + "/transactions")
         .then()
                 .statusCode(200)
-                .body("size()", equalTo(2))
+                .body("size()", equalTo(3))
                 // Most recent first
                 .body("[0].type", equalTo("SPEND"))
                 .body("[1].type", equalTo("TOP_UP"));
@@ -295,13 +308,30 @@ class CardIntegrationTest {
     // ─── Helper ──────────────────────────────────────────────────────────────
 
     private String createCard(String name, double balance) {
-        return given()
-                .contentType(ContentType.JSON)
+        return givenJsonAuth()
                 .body(String.format("{\"cardholderName\": \"%s\", \"initialBalance\": %.2f}", name, balance))
         .when()
                 .post("/cards")
         .then()
                 .statusCode(201)
                 .extract().path("id");
+    }
+
+    private RequestSpecification givenAuth() {
+        return given().header("Authorization", AUTH_HEADER);
+    }
+
+    private RequestSpecification givenJsonAuth() {
+        return givenAuth().contentType(ContentType.JSON);
+    }
+
+    private Jwt testJwt() {
+        Instant now = Instant.now();
+        return new Jwt(
+                "test-token",
+                now,
+                now.plusSeconds(3600),
+                Map.of("alg", "none"),
+                Map.of("sub", "test-user", "scope", "cards"));
     }
 }

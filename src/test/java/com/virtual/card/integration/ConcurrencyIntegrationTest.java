@@ -8,6 +8,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -62,12 +64,15 @@ class ConcurrencyIntegrationTest {
     @Autowired
     CardService cardService;
 
+    @MockBean
+    JwtDecoder jwtDecoder;
+
     @Test
     @DisplayName("50 concurrent spends of £10 on a £300 card — exactly 30 succeed, balance ends at 0")
     void concurrentSpends_balanceNeverGoesNegative() throws InterruptedException {
         // Arrange
         Card card = cardService.createCard("Concurrent Test User", new BigDecimal("300.00"),
-                LocalDateTime.now().plusYears(1));
+                LocalDateTime.now().plusYears(1), "test-user");
 
         int threads = 50;
         BigDecimal spendAmount = new BigDecimal("10.00");
@@ -120,7 +125,7 @@ class ConcurrencyIntegrationTest {
     void mixedConcurrentOperations_balanceIntegrity() throws InterruptedException {
         // Start with £100
         Card card = cardService.createCard("Mixed Concurrency User", new BigDecimal("100.00"),
-                LocalDateTime.now().plusYears(1));
+                LocalDateTime.now().plusYears(1), "test-user");
 
         int spendThreads = 20;
         int topUpThreads = 10;

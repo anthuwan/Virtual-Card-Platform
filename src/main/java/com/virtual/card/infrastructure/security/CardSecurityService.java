@@ -46,10 +46,17 @@ public class CardSecurityService {
      * @throws AccessDeniedException  if the caller does not own the card
      */
     public void assertOwnership(UUID cardId) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         String authenticatedUserId = getAuthenticatedUserId();
 
         var card = cardRepository.findById(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
+
+        if (auth != null && auth.getAuthorities().stream()
+                .anyMatch(authority -> "ROLE_ADMIN".equals(authority.getAuthority()))) {
+            log.debug("Admin access granted: cardId={}, userId={}", cardId, authenticatedUserId);
+            return;
+        }
 
         // Cards without an ownerId (legacy/system cards) are accessible to all authenticated users
         if (card.getOwnerId() == null) {

@@ -26,15 +26,6 @@ spring:
           # Spring Boot auto-fetches the JWKS from {issuer-uri}/.well-known/openid-configuration
           issuer-uri: ${JWT_ISSUER_URI:http://localhost:9090/realms/virtual-card}
 
-  # Request size limits — prevent large payload attacks on JSON endpoints
-  mvc:
-    servlet:
-      max-request-header-size: 8KB
-
-server:
-  tomcat:
-    max-http-form-post-size: 50KB   # max JSON body size — cards/transactions need only a few bytes
-
   cache:
     # Using Caffeine (in-process). To switch to Redis for multi-instance deployments:
     # type: redis
@@ -51,6 +42,11 @@ server:
     properties:
       hibernate:
         format_sql: false
+
+server:
+  max-http-request-header-size: 8KB
+  tomcat:
+    max-http-form-post-size: 50KB   # cards/transactions need only small request bodies
 
 # Actuator / Observability
 management:
@@ -71,6 +67,8 @@ springdoc:
     path: /api-docs
   swagger-ui:
     path: /swagger-ui.html
+    config-url: /api-docs/swagger-config
+    url: /api-docs
     operationsSorter: method
 
 # Resilience4j — Circuit Breaker for FraudCheckService

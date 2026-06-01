@@ -6,7 +6,7 @@ info:
 
     ## Key Design Notes
     - All financial amounts use decimal with 4 decimal places precision
-    - Idempotency is supported on mutating operations via the `Idempotency-Key` header
+    - Idempotency is required on spend/top-up via the `Idempotency-Key` header
     - Insufficient-funds spend returns HTTP 200 with `status: DECLINED` (not an error)
     - Rate limiting: 100 requests/minute per IP (configurable)
   version: 1.0.0
@@ -17,6 +17,9 @@ servers:
   - url: http://localhost:8080/api/v1
     description: Local development server
 
+security:
+  - bearerAuth: []
+
 tags:
   - name: Cards
     description: Virtual card lifecycle management
@@ -25,6 +28,22 @@ tags:
 
 paths:
   /cards:
+    get:
+      tags: [Cards]
+      summary: List my cards
+      operationId: listCards
+      responses:
+        '200':
+          description: Cards owned by the authenticated user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
     post:
       tags: [Cards]
       summary: Issue a new virtual card
@@ -52,6 +71,8 @@ paths:
                 $ref: '#/components/schemas/CardResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/RateLimitError'
 
@@ -71,6 +92,8 @@ paths:
                 $ref: '#/components/schemas/CardResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /cards/{cardId}/block:
     patch:
@@ -89,6 +112,8 @@ paths:
                 $ref: '#/components/schemas/CardResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/CardNotActive'
 
@@ -109,6 +134,8 @@ paths:
                 $ref: '#/components/schemas/CardResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /cards/{cardId}/spend:
     post:
@@ -121,7 +148,7 @@ paths:
         with `status: "DECLINED"` — this is not an error condition but a business
         outcome. The declined transaction is persisted for audit purposes.
 
-        Supports idempotent retries via the `Idempotency-Key` header.
+        Requires an `Idempotency-Key` header for safe retries.
       operationId: spend
       parameters:
         - $ref: '#/components/parameters/CardId'
@@ -146,8 +173,12 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '404':
           $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/CardNotActive'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
         '429':
           $ref: '#/components/responses/RateLimitError'
 
@@ -157,7 +188,7 @@ paths:
       summary: Top up a card
       description: |
         Adds funds to an ACTIVE card.
-        Supports idempotent retries via the `Idempotency-Key` header.
+        Requires an `Idempotency-Key` header for safe retries.
       operationId: topUp
       parameters:
         - $ref: '#/components/parameters/CardId'
@@ -182,8 +213,12 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '404':
           $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/CardNotActive'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
         '429':
           $ref: '#/components/responses/RateLimitError'
 
@@ -206,8 +241,16 @@ paths:
                   $ref: '#/components/schemas/TransactionResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
   parameters:
     CardId:
       name: cardId
@@ -221,14 +264,14 @@ components:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      required: false
+      required: true
       schema:
         type: string
         maxLength: 255
       description: |
-        Client-generated unique key for safe retries. If a request with this
-        key was already processed, the original response is returned without
-        re-executing the operation.
+        Client-generated unique key for safe retries. If the same card,
+        operation type, and amount were already processed with this key, the
+        original response is returned without re-executing the operation.
       example: "txn-550e8400-e29b-41d4-a716-446655440000"
 
   schemas:
@@ -343,6 +386,20 @@ components:
           format: date-time
 
   responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Authenticated user does not own this card
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
     NotFound:
       description: Resource not found
       content:
@@ -359,6 +416,13 @@ components:
 
     CardNotActive:
       description: Card is not in ACTIVE status
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    IdempotencyConflict:
+      description: Idempotency key was already used for a different operation
       content:
         application/json:
           schema:

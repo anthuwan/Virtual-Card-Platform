@@ -6,6 +6,7 @@ import com.virtual.card.domain.transaction.TransactionStatus;
 import com.virtual.card.domain.transaction.TransactionType;
 import com.virtual.card.exception.CardNotFoundException;
 import com.virtual.card.exception.CardNotActiveException;
+import com.virtual.card.exception.IdempotencyConflictException;
 import com.virtual.card.infrastructure.async.CardEventProcessor;
 import com.virtual.card.infrastructure.audit.TransactionAuditEvent;
 import com.virtual.card.infrastructure.cache.CardCacheService;
@@ -24,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -36,9 +38,9 @@ import java.util.UUID;
  * database level, preventing lost updates and double-spend conditions.
  *
  * <h2>Idempotency</h2>
- * <p>Callers may include an {@code Idempotency-Key} header. If a transaction with that
- * key already exists, the original result is returned without re-processing — safe
- * for client retries on network failures.
+ * <p>Callers must include an {@code Idempotency-Key} header for spend/top-up. If a
+ * matching transaction with that key already exists, the original result is returned
+ * without re-processing — safe for client retries on network failures.
  *
  * <h2>Balance Invariant</h2>
  * <p>Balance ≥ 0 is enforced at the service layer. The DB schema also has a
@@ -137,20 +139,27 @@ public class CardService {
         backoff = @Backoff(delay = 50, multiplier = 2)
     )
     public Transaction spend(UUID cardId, BigDecimal amount, String idempotencyKey, String description) {
-        log.info("Spend request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, idempotencyKey);
+        String key = requireIdempotencyKey(idempotencyKey);
+        log.info("Spend request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, key);
 
         // Idempotency check — fast path before acquiring lock
-        if (idempotencyKey != null) {
-            var existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
-            if (existing.isPresent()) {
-                log.info("Idempotent spend replay: key={}, txId={}", idempotencyKey, existing.get().getId());
-                return existing.get();
-            }
+        Optional<Transaction> existing = findExistingIdempotentTransaction(
+                key, cardId, TransactionType.SPEND, amount);
+        if (existing.isPresent()) {
+            log.info("Idempotent spend replay: key={}, txId={}", key, existing.get().getId());
+            return existing.get();
         }
 
         // Acquire pessimistic write lock — serialises concurrent spends on same card
         Card card = cardRepository.findByIdForUpdate(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
+
+        // Re-check after the lock to handle two identical retries racing each other.
+        existing = findExistingIdempotentTransaction(key, cardId, TransactionType.SPEND, amount);
+        if (existing.isPresent()) {
+            log.info("Idempotent spend replay after lock: key={}, txId={}", key, existing.get().getId());
+            return existing.get();
+        }
 
         // Card must be ACTIVE
         if (!card.isOperational()) {
@@ -163,7 +172,7 @@ public class CardService {
             log.warn("Spend blocked — fraud suspected: cardId={}, amount={}", cardId, amount);
             Transaction fraudDeclined = new Transaction(
                     card, TransactionType.SPEND, amount,
-                    TransactionStatus.DECLINED, idempotencyKey, "Fraud suspected");
+                    TransactionStatus.DECLINED, key, "Fraud suspected");
             transactionRepository.save(fraudDeclined);
             metrics.incrementSpendDeclined();
             cardEventProcessor.processSpendEvent(fraudDeclined); // async: notify + webhook
@@ -176,7 +185,7 @@ public class CardService {
                     cardId, card.getBalance(), amount);
             Transaction declined = new Transaction(
                     card, TransactionType.SPEND, amount,
-                    TransactionStatus.DECLINED, idempotencyKey, description);
+                    TransactionStatus.DECLINED, key, description);
             transactionRepository.save(declined);
 
             metrics.incrementSpendDeclined();
@@ -191,7 +200,7 @@ public class CardService {
 
         Transaction tx = new Transaction(
                 card, TransactionType.SPEND, amount,
-                TransactionStatus.SUCCESSFUL, idempotencyKey, description);
+                TransactionStatus.SUCCESSFUL, key, description);
         transactionRepository.save(tx);
 
         metrics.incrementSpendSuccess();
@@ -220,20 +229,27 @@ public class CardService {
         backoff = @Backoff(delay = 50, multiplier = 2)
     )
     public Transaction topUp(UUID cardId, BigDecimal amount, String idempotencyKey, String description) {
-        log.info("TopUp request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, idempotencyKey);
+        String key = requireIdempotencyKey(idempotencyKey);
+        log.info("TopUp request: cardId={}, amount={}, idempotencyKey={}", cardId, amount, key);
 
         // Idempotency check
-        if (idempotencyKey != null) {
-            var existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
-            if (existing.isPresent()) {
-                log.info("Idempotent topUp replay: key={}, txId={}", idempotencyKey, existing.get().getId());
-                return existing.get();
-            }
+        Optional<Transaction> existing = findExistingIdempotentTransaction(
+                key, cardId, TransactionType.TOP_UP, amount);
+        if (existing.isPresent()) {
+            log.info("Idempotent topUp replay: key={}, txId={}", key, existing.get().getId());
+            return existing.get();
         }
 
         // Acquire pessimistic write lock
         Card card = cardRepository.findByIdForUpdate(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
+
+        // Re-check after the lock to handle two identical retries racing each other.
+        existing = findExistingIdempotentTransaction(key, cardId, TransactionType.TOP_UP, amount);
+        if (existing.isPresent()) {
+            log.info("Idempotent topUp replay after lock: key={}, txId={}", key, existing.get().getId());
+            return existing.get();
+        }
 
         // Card must be ACTIVE
         if (!card.isOperational()) {
@@ -247,7 +263,7 @@ public class CardService {
 
         Transaction tx = new Transaction(
                 card, TransactionType.TOP_UP, amount,
-                TransactionStatus.SUCCESSFUL, idempotencyKey, description);
+                TransactionStatus.SUCCESSFUL, key, description);
         transactionRepository.save(tx);
 
         metrics.incrementTopUpSuccess();
@@ -277,6 +293,24 @@ public class CardService {
     }
 
     /**
+     * Reactivates a BLOCKED card. Only BLOCKED → ACTIVE is permitted.
+     * CLOSED and EXPIRED cards cannot be reactivated.
+     */
+    public Card activateCard(UUID cardId) {
+        log.info("Activating card: id={}", cardId);
+        Card card = cardRepository.findById(cardId)
+                .orElseThrow(() -> new CardNotFoundException(cardId));
+        if (card.getStatus() != CardStatus.BLOCKED) {
+            throw new CardNotActiveException(cardId, card.getStatus());
+        }
+        card.setStatus(CardStatus.ACTIVE);
+        Card saved = cardRepository.save(card);
+        cardCacheService.refreshCard(saved);
+        cardEventProcessor.processCardStatusEvent(saved);
+        return saved;
+    }
+
+    /**
      * Blocks an ACTIVE card. Spend and top-up are disabled while blocked.
      */
     public Card blockCard(UUID cardId) {
@@ -295,11 +329,15 @@ public class CardService {
 
     /**
      * Permanently closes a card. Irreversible.
+     * Allowed from ACTIVE or BLOCKED; rejected if already CLOSED or EXPIRED.
      */
     public Card closeCard(UUID cardId) {
         log.info("Closing card: id={}", cardId);
         Card card = cardRepository.findById(cardId)
                 .orElseThrow(() -> new CardNotFoundException(cardId));
+        if (card.getStatus() == CardStatus.CLOSED || card.getStatus() == CardStatus.EXPIRED) {
+            throw new CardNotActiveException(cardId, card.getStatus());
+        }
         card.setStatus(CardStatus.CLOSED);
         Card saved = cardRepository.save(card);
         cardCacheService.refreshCard(saved); // update cache with CLOSED status
@@ -323,5 +361,35 @@ public class CardService {
         if (!expiring.isEmpty()) {
             log.info("Expired {} cards", expiring.size());
         }
+    }
+
+    private String requireIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            throw new IllegalArgumentException("Idempotency-Key header is required for spend and top-up operations");
+        }
+        String trimmed = idempotencyKey.trim();
+        if (trimmed.length() > 255) {
+            throw new IllegalArgumentException("Idempotency-Key must not exceed 255 characters");
+        }
+        return trimmed;
+    }
+
+    private Optional<Transaction> findExistingIdempotentTransaction(
+            String idempotencyKey, UUID cardId, TransactionType type, BigDecimal amount) {
+        return transactionRepository.findByIdempotencyKey(idempotencyKey)
+                .map(existing -> validateIdempotentReplay(existing, idempotencyKey, cardId, type, amount));
+    }
+
+    private Transaction validateIdempotentReplay(
+            Transaction existing, String idempotencyKey, UUID cardId, TransactionType type, BigDecimal amount) {
+        boolean sameCard = cardId.equals(existing.getCardId());
+        boolean sameType = type == existing.getType();
+        boolean sameAmount = existing.getAmount().compareTo(amount) == 0;
+
+        if (!sameCard || !sameType || !sameAmount) {
+            throw new IdempotencyConflictException(idempotencyKey);
+        }
+
+        return existing;
     }
 }

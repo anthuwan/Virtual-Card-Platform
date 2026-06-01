@@ -21,6 +21,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -55,6 +56,8 @@ class CardServiceTest {
         cardId = UUID.randomUUID();
         activeCard = new Card("Jane Smith", new BigDecimal("100.00"),
                 CardStatus.ACTIVE, LocalDateTime.now().plusYears(3));
+        ReflectionTestUtils.setField(activeCard, "id", cardId);
+        lenient().when(transactionRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
     }
 
     // ─── createCard ───────────────────────────────────────────────────────────
@@ -102,7 +105,7 @@ class CardServiceTest {
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(activeCard));
             when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), null, null);
+            Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), "spend-key-1", null);
 
             assertThat(result.getStatus()).isEqualTo(TransactionStatus.SUCCESSFUL);
             assertThat(result.getType()).isEqualTo(TransactionType.SPEND);
@@ -118,7 +121,7 @@ class CardServiceTest {
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(lowCard));
             when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), null, null);
+            Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), "spend-key-2", null);
 
             assertThat(result.getStatus()).isEqualTo(TransactionStatus.DECLINED);
             assertThat(lowCard.getBalance()).isEqualByComparingTo("10.00"); // balance unchanged
@@ -130,7 +133,7 @@ class CardServiceTest {
         void throwsWhenCardNotFound() {
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.empty());
 
-            assertThatThrownBy(() -> cardService.spend(cardId, new BigDecimal("10.00"), null, null))
+            assertThatThrownBy(() -> cardService.spend(cardId, new BigDecimal("10.00"), "spend-missing", null))
                     .isInstanceOf(CardNotFoundException.class);
         }
 
@@ -141,7 +144,7 @@ class CardServiceTest {
                     CardStatus.BLOCKED, null);
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(blockedCard));
 
-            assertThatThrownBy(() -> cardService.spend(cardId, new BigDecimal("10.00"), null, null))
+            assertThatThrownBy(() -> cardService.spend(cardId, new BigDecimal("10.00"), "spend-blocked", null))
                     .isInstanceOf(CardNotActiveException.class);
 
             verify(transactionRepository, never()).save(any());
@@ -151,7 +154,7 @@ class CardServiceTest {
         @DisplayName("returns existing transaction on duplicate idempotency key")
         void idempotentSpend() {
             String key = "idem-key-123";
-            Transaction existingTx = buildTransaction(TransactionStatus.SUCCESSFUL, "50.00");
+            Transaction existingTx = buildTransaction(TransactionType.SPEND, TransactionStatus.SUCCESSFUL, "50.00");
             when(transactionRepository.findByIdempotencyKey(key)).thenReturn(Optional.of(existingTx));
 
             Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), key, null);
@@ -168,7 +171,7 @@ class CardServiceTest {
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(exactCard));
             when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), null, null);
+            Transaction result = cardService.spend(cardId, new BigDecimal("50.00"), "spend-exact", null);
 
             assertThat(result.getStatus()).isEqualTo(TransactionStatus.SUCCESSFUL);
             assertThat(exactCard.getBalance()).isEqualByComparingTo("0.00");
@@ -187,7 +190,7 @@ class CardServiceTest {
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(activeCard));
             when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            Transaction result = cardService.topUp(cardId, new BigDecimal("200.00"), null, null);
+            Transaction result = cardService.topUp(cardId, new BigDecimal("200.00"), "topup-key-1", null);
 
             assertThat(result.getStatus()).isEqualTo(TransactionStatus.SUCCESSFUL);
             assertThat(activeCard.getBalance()).isEqualByComparingTo("300.00"); // 100 + 200
@@ -201,7 +204,7 @@ class CardServiceTest {
                     CardStatus.CLOSED, null);
             when(cardRepository.findByIdForUpdate(cardId)).thenReturn(Optional.of(closedCard));
 
-            assertThatThrownBy(() -> cardService.topUp(cardId, new BigDecimal("10.00"), null, null))
+            assertThatThrownBy(() -> cardService.topUp(cardId, new BigDecimal("10.00"), "topup-closed", null))
                     .isInstanceOf(CardNotActiveException.class);
         }
 
@@ -209,7 +212,7 @@ class CardServiceTest {
         @DisplayName("returns existing transaction on duplicate idempotency key")
         void idempotentTopUp() {
             String key = "topup-idem-456";
-            Transaction existingTx = buildTransaction(TransactionStatus.SUCCESSFUL, "200.00");
+            Transaction existingTx = buildTransaction(TransactionType.TOP_UP, TransactionStatus.SUCCESSFUL, "200.00");
             when(transactionRepository.findByIdempotencyKey(key)).thenReturn(Optional.of(existingTx));
 
             Transaction result = cardService.topUp(cardId, new BigDecimal("200.00"), key, null);
@@ -229,7 +232,6 @@ class CardServiceTest {
         @DisplayName("returns transactions for existing card")
         void returnsHistory() {
             when(cardRepository.existsById(cardId)).thenReturn(true);
-            when(cardCacheService.getCard(cardId)).thenReturn(activeCard);
             when(transactionRepository.findByCardId(cardId)).thenReturn(List.of());
 
             List<Transaction> result = cardService.getTransactionHistory(cardId);
@@ -241,7 +243,6 @@ class CardServiceTest {
         @DisplayName("throws CardNotFoundException for unknown card")
         void throwsForUnknownCard() {
             when(cardRepository.existsById(cardId)).thenReturn(false);
-            when(cardCacheService.getCard(cardId)).thenThrow(new CardNotFoundException(cardId));
 
             assertThatThrownBy(() -> cardService.getTransactionHistory(cardId))
                     .isInstanceOf(CardNotFoundException.class);
@@ -250,9 +251,10 @@ class CardServiceTest {
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
-    private Transaction buildTransaction(TransactionStatus status, String amount) {
+    private Transaction buildTransaction(TransactionType type, TransactionStatus status, String amount) {
         Card card = new Card("Jane Smith", new BigDecimal(amount),
                 CardStatus.ACTIVE, LocalDateTime.now().plusYears(3));
-        return new Transaction(card, TransactionType.SPEND, new BigDecimal(amount), status, null, null);
+        ReflectionTestUtils.setField(card, "id", cardId);
+        return new Transaction(card, type, new BigDecimal(amount), status, null, null);
     }
 }

@@ -7,12 +7,11 @@ A production-grade backend for issuing virtual cards, processing spend/top-up op
 ## Quick Start
 
 ```bash
-# Start PostgreSQL
-brew services start postgresql@16
-psql -U postgres -c "CREATE DATABASE virtualcard;"
+# Start PostgreSQL (Docker)
+docker compose up -d postgres
 
-# Run (Flyway creates tables automatically)
-mvn spring-boot:run
+# Run locally with a fixed development user (dev-user)
+SPRING_PROFILES_ACTIVE=dev mvn spring-boot:run
 ```
 
 | URL | Description |
@@ -30,21 +29,31 @@ mvn verify                           # full suite (requires Docker)
 
 ## API
 
-All endpoints require `Authorization: Bearer <jwt>`.
+All endpoints require `Authorization: Bearer <jwt>` outside the `dev` profile.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/cards` | Issue a new virtual card |
+| `GET` | `/api/v1/cards` | List cards owned by the authenticated user |
 | `GET` | `/api/v1/cards/{id}` | Get card details and balance |
+| `PATCH` | `/api/v1/cards/{id}/activate` | Reactivate a blocked card |
 | `PATCH` | `/api/v1/cards/{id}/block` | Block an active card |
 | `PATCH` | `/api/v1/cards/{id}/close` | Permanently close a card |
 | `POST` | `/api/v1/cards/{id}/spend` | Spend from a card |
 | `POST` | `/api/v1/cards/{id}/top-up` | Top up a card |
 | `GET` | `/api/v1/cards/{id}/transactions` | Transaction history |
 
-**Idempotency** — Pass `Idempotency-Key` header on spend/top-up for safe retries.
+**Idempotency** — `Idempotency-Key` is required on spend/top-up for safe retries. Reusing the same key with the same card, operation type, and amount returns the original transaction. Reusing it for a different operation returns `409 IDEMPOTENCY_CONFLICT`.
 
 **Declined vs Error** — Insufficient funds returns HTTP 200 `status: DECLINED`, not an error. Preserved for audit.
+
+### Auth Modes
+
+For normal environments, configure `JWT_ISSUER_URI` to your identity provider. Spring validates bearer tokens against the issuer JWKS, and card ownership is enforced with the JWT `sub` claim.
+
+In Swagger UI, click **Authorize** and paste a bearer token when running outside the `dev` profile. Token issuance stays with the identity provider; this service only validates tokens.
+
+For local review, use `SPRING_PROFILES_ACTIVE=dev`. This disables external JWT discovery and injects a fixed authenticated principal, `dev-user`, so the API can be exercised without running Keycloak/Auth0/Cognito.
 
 ---
 
@@ -56,7 +65,7 @@ All endpoints require `Authorization: Bearer <jwt>`.
 
 **Guaranteed event delivery**
 - Transactional outbox — events written to DB in same transaction as business op
-- Scheduler polls and publishes to Kafka; retries up to 5× before marking FAILED
+- Scheduler polls pending events; Kafka publishing is isolated behind a placeholder publisher and can be swapped to `KafkaTemplate`
 
 **Fault tolerance**
 - Resilience4j circuit breaker on `FraudCheckService` — fail-open fallback if fraud service is down
@@ -67,7 +76,7 @@ All endpoints require `Authorization: Bearer <jwt>`.
 
 **Caching**
 - Caffeine cache on `getCard()`, TTL 5s — evicted on balance/status change
-- Swap to Redis for multi-instance with one config line change
+- Redis is the intended multi-instance upgrade by replacing the cache manager configuration
 
 **Observability**
 - Micrometer → Prometheus metrics (spend/topup counters, amount distribution p50/p95/p99)
@@ -117,13 +126,23 @@ Replace each with a real implementation — the interfaces and wiring are alread
 
 ---
 
+## Evolution to Microservices / Event-Driven Architecture
+
+- Keep this service as the card ledger owner: card state, balance mutations, idempotency, and transaction history remain in one transactional boundary.
+- Publish immutable card and transaction events from the outbox to Kafka, keyed by `cardId` for per-card ordering.
+- Split non-critical workflows into consumers: notifications, webhook delivery, fraud/risk analytics, reporting, and customer communications.
+- Move read-heavy screens to projections built from events, while the write API continues to enforce balance invariants through the relational database.
+- Introduce service-to-service auth, consumer idempotency, replay tooling, and dead-letter topics before replacing the placeholder publisher with production Kafka.
+
+---
+
 ## What I Would Do With More Time
 
 - Replace in-process Bucket4j with Redis-backed for shared rate limiting across instances
 - Replace `CardEventPublisher` placeholder with real `KafkaTemplate` and consumer group
 - Add cursor-based pagination on `GET /api/v1/cards/{id}/transactions`
 - Add webhook endpoint registration API with HMAC signature verification and delivery log
-- Add `GET /api/v1/cards` list endpoint pagination (currently returns full list)
+- Add cursor-based pagination to `GET /api/v1/cards` (currently returns full list)
 - Expand test coverage: security layer tests, outbox retry tests, circuit breaker state tests
 
 ---

@@ -30,7 +30,7 @@ import java.util.UUID;
  * REST controller for virtual card operations.
  *
  * <p>API versioned under {@code /api/v1} to allow non-breaking evolution.
- * The {@code Idempotency-Key} header is supported on mutating operations
+ * The {@code Idempotency-Key} header is required on financial operations
  * (spend, top-up) to enable safe client-side retries.
  */
 @RestController
@@ -109,6 +109,14 @@ public class CardController {
         return CardResponse.from(cardService.getCard(cardId));
     }
 
+    @PatchMapping("/{cardId}/activate")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Activate a blocked card", description = "Reactivates a BLOCKED card. Only BLOCKED → ACTIVE is permitted. CLOSED and EXPIRED cards cannot be reactivated.")
+    public CardResponse activateCard(@PathVariable UUID cardId) {
+        cardSecurityService.assertOwnership(cardId);
+        return CardResponse.from(cardService.activateCard(cardId));
+    }
+
     @PatchMapping("/{cardId}/block")
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Block a card", description = "Suspends an ACTIVE card. Spending and top-ups are disabled.")
@@ -132,9 +140,10 @@ public class CardController {
             summary = "Spend from a card",
             description = "Deducts the specified amount from the card balance. " +
                     "If funds are insufficient, the transaction is recorded as DECLINED (not an error). " +
-                    "Supports idempotent retries via the Idempotency-Key header.",
+                    "Requires the Idempotency-Key header for safe retries.",
             parameters = {
-                    @Parameter(name = IDEMPOTENCY_KEY_HEADER, description = "Client-generated unique key for idempotent retries",
+                    @Parameter(name = IDEMPOTENCY_KEY_HEADER, required = true,
+                            description = "Client-generated unique key for idempotent retries",
                             example = "txn-uuid-4321", schema = @Schema(type = "string"))
             },
             responses = {
@@ -147,7 +156,7 @@ public class CardController {
     public TransactionResponse spend(
             @PathVariable UUID cardId,
             @Valid @RequestBody MoneyOperationRequest request,
-            @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String idempotencyKey) {
 
         cardSecurityService.assertOwnership(cardId);
         Transaction tx = cardService.spend(cardId, request.amount(), idempotencyKey, request.description());
@@ -158,9 +167,10 @@ public class CardController {
     @Operation(
             summary = "Top up a card",
             description = "Adds funds to an ACTIVE card. " +
-                    "Supports idempotent retries via the Idempotency-Key header.",
+                    "Requires the Idempotency-Key header for safe retries.",
             parameters = {
-                    @Parameter(name = IDEMPOTENCY_KEY_HEADER, description = "Client-generated unique key for idempotent retries",
+                    @Parameter(name = IDEMPOTENCY_KEY_HEADER, required = true,
+                            description = "Client-generated unique key for idempotent retries",
                             example = "topup-uuid-1234", schema = @Schema(type = "string"))
             },
             responses = {
@@ -173,7 +183,7 @@ public class CardController {
     public TransactionResponse topUp(
             @PathVariable UUID cardId,
             @Valid @RequestBody MoneyOperationRequest request,
-            @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String idempotencyKey) {
 
         cardSecurityService.assertOwnership(cardId);
         Transaction tx = cardService.topUp(cardId, request.amount(), idempotencyKey, request.description());
