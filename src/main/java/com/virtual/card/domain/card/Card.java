@@ -29,9 +29,8 @@ import java.util.UUID;
 public class Card {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", updatable = false, nullable = false)
-    private UUID id;
+    private UUID id = UUID.randomUUID(); // assigned in Java — available immediately, before any DB flush
 
     @Column(name = "cardholder_name", nullable = false, length = 255)
     private String cardholderName;
