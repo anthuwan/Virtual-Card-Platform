@@ -4,6 +4,7 @@ import com.virtual.card.infrastructure.kafka.CardEventPublisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -70,9 +71,11 @@ public class OutboxService {
      * <p>TODO: replace log statements with real {@code kafkaTemplate.send()} calls.
      */
     @Scheduled(fixedDelayString = "${app.outbox.poll-interval-ms:5000}")
+    @SchedulerLock(name = "outboxPoller", lockAtMostFor = "4m", lockAtLeastFor = "30s")
     @Transactional
     public void pollAndPublish() {
-        List<OutboxEvent> pending = outboxEventRepository.findPendingEvents(PageRequest.of(0, 100));
+        List<OutboxEvent> pending = outboxEventRepository.findByStatusOrderByCreatedAt(
+                OutboxEvent.Status.PENDING, PageRequest.of(0, 100));
         if (pending.isEmpty()) return;
 
         log.debug("Outbox poller: found {} PENDING events", pending.size());

@@ -7,12 +7,15 @@ A production-grade backend for issuing virtual cards, processing spend/top-up op
 ## Quick Start
 
 ```bash
-# Start PostgreSQL (Docker)
-docker compose up -d postgres
+# Start PostgreSQL
+brew services start postgresql@16
+psql -U postgres -c "CREATE DATABASE virtualcard;"
 
-# Run locally with a fixed development user (dev-user)
+# Run (dev profile — no JWT required)
 SPRING_PROFILES_ACTIVE=dev mvn spring-boot:run
 ```
+
+> **Note:** JWT OAuth2 authentication is fully implemented but disabled in the `dev` profile for ease of evaluation. No `Authorization` header is needed — all requests are automatically authenticated as `dev-user`. To enable JWT, remove `SPRING_PROFILES_ACTIVE=dev` and configure `JWT_ISSUER_URI`.
 
 | URL | Description |
 |-----|-------------|

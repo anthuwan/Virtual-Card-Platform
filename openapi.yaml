@@ -95,6 +95,28 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /cards/{cardId}/activate:
+    patch:
+      tags: [Cards]
+      summary: Activate a blocked card
+      description: Reactivates a BLOCKED card. CLOSED and EXPIRED cards cannot be reactivated.
+      operationId: activateCard
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+      responses:
+        '200':
+          description: Card activated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/CardNotActive'
+
   /cards/{cardId}/block:
     patch:
       tags: [Cards]
